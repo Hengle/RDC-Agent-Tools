@@ -152,7 +152,7 @@ def _server_env() -> dict[str, str]:
 
 
 def _prepare_artifacts(root: Path) -> dict[str, Path]:
-    artifacts = root / "intermediate" / "artifacts"
+    artifacts = Path(os.environ.get("RDX_ARTIFACT_DIR", str(root / "intermediate" / "artifacts")))
     artifacts.mkdir(parents=True, exist_ok=True)
 
     sample_file = artifacts / "sample.bin"
@@ -916,6 +916,8 @@ async def _run_transport_mcp(
     files: dict[str, Path],
     local_rdc: Path,
     remote_rdc: Path,
+    *,
+    skip_remote: bool = False,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     listed_names: set[str] = set()
@@ -962,6 +964,28 @@ async def _run_transport_mcp(
                 for name in _ordered_tool_names(names):
                     param_names = params_map.get(name, [])
                     matrix = "remote" if _is_remote_matrix_tool(name, param_names) else "local"
+                    if skip_remote and matrix == "remote":
+                        args = _build_args(name, param_names, states["local"], files)
+                        items.append(
+                            {
+                                "tool": name,
+                                "transport": "mcp",
+                                "matrix": matrix,
+                                "status": "issue",
+                                "reason": "local-only mode: remote matrix skipped",
+                                "issue_type": "scope_skip",
+                                "fix_hint": "Run remote workflow in dedicated remote-only smoke pass.",
+                                "impact_scope": "local mode",
+                                "ok": False,
+                                "callable": False,
+                                "contract": False,
+                                "args": args,
+                                "error_code": "remote_skipped_local_mode",
+                                "evidence": "tool requires remote scope and has been skipped for local-only run",
+                                "repro_command": f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
+                            },
+                        )
+                        continue
                     state = states[matrix]
                     requires_capture = ("session_id" in param_names) or ("capture_file_id" in param_names)
                     had_remote_id = bool(state.remote_id)
@@ -1131,6 +1155,8 @@ async def _run_transport_daemon(
     local_rdc: Path,
     remote_rdc: Path,
     daemon_context_prefix: str,
+    *,
+    skip_remote: bool = False,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     fatal_error = ""
@@ -1172,6 +1198,31 @@ async def _run_transport_daemon(
             matrix = "remote" if _is_remote_matrix_tool(name, param_names) else "local"
             state = states[matrix]
             requires_capture = ("session_id" in param_names) or ("capture_file_id" in param_names)
+            if skip_remote and matrix == "remote":
+                args = _build_args(name, param_names, states["local"], files)
+                items.append(
+                    {
+                        "tool": name,
+                        "transport": "daemon",
+                        "matrix": matrix,
+                        "status": "issue",
+                        "reason": "local-only mode: remote matrix skipped",
+                        "issue_type": "scope_skip",
+                        "fix_hint": "Run remote workflow in dedicated remote-only smoke pass.",
+                        "impact_scope": "local mode",
+                        "ok": False,
+                        "callable": False,
+                        "contract": False,
+                        "args": args,
+                        "error_code": "remote_skipped_local_mode",
+                        "evidence": "tool requires remote scope and has been skipped for local-only run",
+                        "repro_command": (
+                            f"python cli/run_cli.py --daemon-context {context_name} call {name} "
+                            f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"
+                        ),
+                    },
+                )
+                continue
             if matrix == "remote":
                 remote_workflow_events.append(f"daemon-tool:{name}")
             if matrix == "remote" and not state.remote_id:
@@ -1324,6 +1375,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--remote-rdc", default=str(_default_desktop_rdc("WhiteHair.rdc")))
     parser.add_argument("--transport", choices=["mcp", "daemon", "both"], default="both")
     parser.add_argument("--daemon-context-prefix", default="rdx-smoke")
+    parser.add_argument("--skip-remote", action="store_true", help="Skip remote-only tools and remote matrix validation in local smoke mode.")
+    parser.add_argument("--artifact-dir", default="", help="Optional artifact root for temporary data.")
     parser.add_argument("--out-json", default="intermediate/logs/tool_contract_report.json")
     parser.add_argument("--out-md", default="intermediate/logs/tool_contract_report.md")
     return parser.parse_args()
@@ -1335,12 +1388,21 @@ def main() -> int:
     local_rdc = Path(args.local_rdc)
     remote_rdc = Path(args.remote_rdc)
 
+    if args.artifact_dir:
+        os.environ["RDX_ARTIFACT_DIR"] = str(Path(args.artifact_dir))
+
     if not local_rdc.is_file():
         print(f"[contract] missing local rdc: {local_rdc}")
         return 2
     if not remote_rdc.is_file():
-        print(f"[contract] missing remote rdc: {remote_rdc}")
-        return 2
+        if args.skip_remote:
+            remote_rdc = local_rdc
+            print(f"[contract] remote sample is skipped, using local sample for metadata: {remote_rdc}")
+        else:
+            print(f"[contract] missing remote rdc: {remote_rdc}")
+            return 2
+    if args.skip_remote:
+        remote_rdc = local_rdc
 
     names, params_map = _load_catalog()
     files = _prepare_artifacts(root)
@@ -1355,7 +1417,15 @@ def main() -> int:
 
     if args.transport in {"mcp", "both"}:
         result["transports"]["mcp"] = asyncio.run(
-            _run_transport_mcp(root, names, params_map, files, local_rdc, remote_rdc),
+            _run_transport_mcp(
+                root,
+                names,
+                params_map,
+                files,
+                local_rdc,
+                remote_rdc,
+                skip_remote=args.skip_remote,
+            ),
         )
     if args.transport in {"daemon", "both"}:
         result["transports"]["daemon"] = asyncio.run(
@@ -1367,6 +1437,7 @@ def main() -> int:
                 local_rdc,
                 remote_rdc,
                 args.daemon_context_prefix,
+                skip_remote=args.skip_remote,
             ),
         )
 
@@ -1395,6 +1466,17 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
+
+
+
+
+
+
 
 
 
