@@ -18,6 +18,8 @@
    排查启动失败、transport、参数位置、状态恢复等常见问题。
 7. [tools.md](tools.md)
    查阅 tool catalog 的权威入口与校验命令。
+8. [android-remote-cli-smoke-prompt.md](android-remote-cli-smoke-prompt.md)
+   复用桌面 / Android 通用的分层 smoke / contract 执行 prompt。
 
 ## 文档边界
 
@@ -27,6 +29,7 @@
 - 最小可运行链路与状态模型。
 - 常见失败恢复与维护规则。
 - 文档自更新治理与功能变更到文档责任的映射。
+- 可直接复用的少量执行模板文档。
 
 本目录不负责：
 
