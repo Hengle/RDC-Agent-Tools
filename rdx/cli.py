@@ -14,15 +14,22 @@ from typing import Any, Dict, Optional
 from rdx.core.assert_service import AssertService
 from rdx.core.contracts import canonical_error, canonical_success
 from rdx.daemon.client import (
+    attach_client,
+    cleanup_stale_daemon_states,
+    clear_context,
     daemon_request,
+    clear_session_state,
+    detach_client,
+    ensure_daemon,
+    heartbeat_client,
     load_daemon_state,
     load_session_state,
     save_session_state,
-    start_daemon,
+    session_state_path,
     stop_daemon,
 )
 from rdx.server import dispatch_operation, runtime_shutdown, runtime_startup
-from rdx.runtime_paths import artifacts_dir, cli_runtime_dir
+from rdx.runtime_paths import artifacts_dir
 
 EXIT_OK = 0
 EXIT_ASSERT_FAIL = 1
@@ -79,7 +86,7 @@ def _daemon_exec(
 def _default_session_id(cli_value: Optional[str], context: str = "default") -> str:
     if cli_value:
         return str(cli_value)
-    state = load_session_state()
+    state = load_session_state(context=context)
     session_id = str(state.get("session_id") or "").strip()
     if session_id:
         return session_id
@@ -164,7 +171,7 @@ async def _cmd_capture_open(args: argparse.Namespace) -> int:
         "active_event_id": int(_extract(set_frame, "active_event_id", 0) or 0),
         "frame_index": int(args.frame_index),
     }
-    save_session_state(state)
+    save_session_state(state, context=str(args.daemon_context))
 
     if args.connect:
         try:
@@ -178,7 +185,7 @@ async def _cmd_capture_open(args: argparse.Namespace) -> int:
             "capture_file_id": capture_file_id,
             "session_id": session_id,
             "active_event_id": state["active_event_id"],
-            "state_path": str((cli_runtime_dir() / "session_state.json").resolve()),
+            "state_path": str(session_state_path(str(args.daemon_context)).resolve()),
             "persistent_session": bool(args.connect),
         },
         transport="cli",
@@ -187,8 +194,8 @@ async def _cmd_capture_open(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _cmd_capture_status(_args: argparse.Namespace) -> int:
-    state = load_session_state()
+def _cmd_capture_status(args: argparse.Namespace) -> int:
+    state = load_session_state(context=str(args.daemon_context))
     if not state:
         payload = canonical_error(
             result_kind="rdx.capture.status",
@@ -331,6 +338,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_daemon_start.add_argument("--owner-pid", type=int, default=None, help="Optional launcher shell PID used for auto stop")
     s_daemon.add_parser("stop")
     s_daemon.add_parser("status")
+    p_daemon_attach = s_daemon.add_parser("attach", help=argparse.SUPPRESS)
+    p_daemon_attach.add_argument("--client-id", required=True)
+    p_daemon_attach.add_argument("--client-type", default="cli-shell")
+    p_daemon_attach.add_argument("--pid", type=int, default=0)
+    p_daemon_attach.add_argument("--lease-timeout-seconds", type=int, default=120)
+    p_daemon_heartbeat = s_daemon.add_parser("heartbeat", help=argparse.SUPPRESS)
+    p_daemon_heartbeat.add_argument("--client-id", required=True)
+    p_daemon_heartbeat.add_argument("--pid", type=int, default=0)
+    p_daemon_detach = s_daemon.add_parser("detach", help=argparse.SUPPRESS)
+    p_daemon_detach.add_argument("--client-id", required=True)
+    s_daemon.add_parser("cleanup", help=argparse.SUPPRESS)
+
+    p_context = sub.add_parser("context", help="Context state helpers")
+    s_context = p_context.add_subparsers(dest="context_cmd", required=True)
+    s_context.add_parser("clear")
 
     p_call = sub.add_parser("call", help="Call any rd.* operation")
     p_call.add_argument("operation")
@@ -387,7 +409,8 @@ async def _main_async(args: argparse.Namespace) -> int:
     ctx = str(args.daemon_context)
     if args.command == "daemon":
         if args.daemon_cmd == "start":
-            ok, message, state = start_daemon(
+            cleanup_stale_daemon_states(context=ctx)
+            ok, message, state = ensure_daemon(
                 pipe_name=args.pipe_name,
                 context=ctx,
                 owner_pid=args.owner_pid if hasattr(args, "owner_pid") else None,
@@ -399,6 +422,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             _print_json(canonical_success(result_kind="rdx.daemon.stop", data={"message": message}, transport="cli") if ok else canonical_error(result_kind="rdx.daemon.stop", code="runtime_error", category="runtime", message=message, transport="cli"))
             return EXIT_OK if ok else EXIT_RUNTIME_ERR
         if args.daemon_cmd == "status":
+            cleanup_stale_daemon_states(context=ctx)
             st = load_daemon_state(context=ctx)
             if not st:
                 _print_json(canonical_error(result_kind="rdx.daemon.status", code="not_found", category="not_found", message="no active daemon", transport="cli"))
@@ -409,11 +433,70 @@ async def _main_async(args: argparse.Namespace) -> int:
                 _print_json(canonical_error(result_kind="rdx.daemon.status", code="runtime_error", category="runtime", message=str(exc), details={"state": st}, transport="cli"))
                 return EXIT_RUNTIME_ERR
             if bool(resp.get("ok")):
-                _print_json(canonical_success(result_kind="rdx.daemon.status", data={"daemon": resp.get("result", {}), "state": st}, transport="cli"))
+                result = resp.get("result", {})
+                state = result.get("state") if isinstance(result, dict) else {}
+                if isinstance(state, dict):
+                    st = state
+                _print_json(canonical_success(result_kind="rdx.daemon.status", data={"daemon": result, "state": st}, transport="cli"))
                 return EXIT_OK
             err = resp.get("error") if isinstance(resp.get("error"), dict) else {}
             _print_json(canonical_error(result_kind="rdx.daemon.status", code=str(err.get("code") or "runtime_error"), category="runtime", message=str(err.get("message") or "daemon status failed"), details={"state": st}, transport="cli"))
             return EXIT_RUNTIME_ERR
+        if args.daemon_cmd == "attach":
+            ok, message, state = attach_client(
+                context=ctx,
+                client_id=str(args.client_id),
+                client_type=str(args.client_type),
+                pid=int(args.pid or 0),
+                lease_timeout_seconds=int(args.lease_timeout_seconds or 120),
+            )
+            _print_json(canonical_success(result_kind="rdx.daemon.attach_client", data={"message": message, "state": state}, transport="cli") if ok else canonical_error(result_kind="rdx.daemon.attach_client", code="runtime_error", category="runtime", message=message, details={"state": state}, transport="cli"))
+            return EXIT_OK if ok else EXIT_RUNTIME_ERR
+        if args.daemon_cmd == "heartbeat":
+            ok, message, state = heartbeat_client(
+                context=ctx,
+                client_id=str(args.client_id),
+                pid=int(args.pid or 0),
+            )
+            _print_json(canonical_success(result_kind="rdx.daemon.heartbeat", data={"message": message, "state": state}, transport="cli") if ok else canonical_error(result_kind="rdx.daemon.heartbeat", code="runtime_error", category="runtime", message=message, details={"state": state}, transport="cli"))
+            return EXIT_OK if ok else EXIT_RUNTIME_ERR
+        if args.daemon_cmd == "detach":
+            ok, message, state = detach_client(
+                context=ctx,
+                client_id=str(args.client_id),
+            )
+            _print_json(canonical_success(result_kind="rdx.daemon.detach_client", data={"message": message, "state": state}, transport="cli") if ok else canonical_error(result_kind="rdx.daemon.detach_client", code="runtime_error", category="runtime", message=message, details={"state": state}, transport="cli"))
+            return EXIT_OK if ok else EXIT_RUNTIME_ERR
+        if args.daemon_cmd == "cleanup":
+            cleaned = cleanup_stale_daemon_states()
+            _print_json(canonical_success(result_kind="rdx.daemon.cleanup", data={"cleaned": cleaned}, transport="cli"))
+            return EXIT_OK
+
+    if args.command == "context":
+        if args.context_cmd == "clear":
+            cleanup_stale_daemon_states(context=ctx)
+            ok, message, details = clear_context(context=ctx)
+            if not ok:
+                _print_json(
+                    canonical_error(
+                        result_kind="rdx.context.clear",
+                        code="runtime_error",
+                        category="runtime",
+                        message=message,
+                        details=details if isinstance(details, dict) else {},
+                        transport="cli",
+                    ),
+                )
+                return EXIT_RUNTIME_ERR
+            clear_session_state(context=ctx)
+            _print_json(
+                canonical_success(
+                    result_kind="rdx.context.clear",
+                    data={"message": message, "cleared": details},
+                    transport="cli",
+                ),
+            )
+            return EXIT_OK
 
     if args.command == "call":
         return await _cmd_call(args)
@@ -441,6 +524,8 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 def _needs_local_runtime(args: argparse.Namespace) -> bool:
     if args.command == "daemon":
+        return False
+    if args.command == "context":
         return False
     if args.command == "capture" and args.capture_cmd == "status":
         return False

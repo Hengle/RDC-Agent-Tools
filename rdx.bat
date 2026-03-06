@@ -8,5 +8,9 @@ if not exist "%LAUNCHER%" (
   echo {"ok":false,"error_code":2,"error_message":"missing launcher script","context_id":"default"}
   exit /b 2
 )
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NoLogo -NonInteractive -ExecutionPolicy Bypass -File "%LAUNCHER%" %*
+set "PS_FLAGS=-NoProfile -NoLogo -ExecutionPolicy Bypass"
+if /I "%~1"=="--non-interactive" (
+  set "PS_FLAGS=%PS_FLAGS% -NonInteractive"
+)
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" %PS_FLAGS% -File "%LAUNCHER%" %*
 exit /b %ERRORLEVEL%

@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from collections import defaultdict
@@ -19,6 +19,14 @@ def _now_iso() -> str:
 def _tools_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
+
+def _resolve_cli_path(root: Path, raw_path: str) -> Path:
+    text = str(raw_path or "").strip()
+    candidate = Path(text)
+    windows_candidate = PureWindowsPath(text)
+    if candidate.is_absolute() or (windows_candidate.drive and windows_candidate.root):
+        return candidate
+    return (root / candidate).resolve()
 
 def _load_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
@@ -58,6 +66,13 @@ def _tool_command_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _is_scope_skip_item(item: dict[str, Any]) -> bool:
+    status = str(item.get("status") or "")
+    if status == "scope_skip":
+        return True
+    return str(item.get("issue_type") or "") == "scope_skip"
+
+
 def _overall_status(blocker: int, issue: int) -> str:
     if blocker > 0:
         return "FAIL"
@@ -79,6 +94,18 @@ def _command_summary(payload: dict[str, Any]) -> dict[str, int]:
 
 
 def _transport_summary(payload: dict[str, Any], transport: str) -> dict[str, int]:
+    items = [item for item in _tool_command_items(payload) if item.get("transport") == transport]
+    if items:
+        return {
+            "total": len(items),
+            "pass": sum(1 for item in items if item.get("status") == "pass"),
+            "issue": sum(1 for item in items if item.get("status") == "issue" and not _is_scope_skip_item(item)),
+            "blocker": sum(1 for item in items if item.get("status") == "blocker"),
+            "scope_skip": sum(1 for item in items if _is_scope_skip_item(item)),
+            "callable_pass": sum(1 for item in items if bool(item.get("callable"))),
+            "contract_pass": sum(1 for item in items if bool(item.get("contract"))),
+        }
+
     transport_payload = payload.get("transports", {}).get(transport, {})
     if not isinstance(transport_payload, dict):
         return {"total": 0, "pass": 0, "issue": 0, "blocker": 0, "scope_skip": 0}
@@ -103,7 +130,7 @@ def _transport_health_tool_count(payload: dict[str, Any], transport: str) -> dic
 
     local_total = sum(1 for item in items if str(item.get("matrix") or "") == "local")
     remote_total = sum(1 for item in items if str(item.get("matrix") or "") == "remote")
-    skip = sum(1 for item in items if str(item.get("issue_type") or "") == "scope_skip")
+    skip = sum(1 for item in items if _is_scope_skip_item(item))
     return {
         "total": len(items),
         "local": local_total,
@@ -115,7 +142,7 @@ def _transport_health_tool_count(payload: dict[str, Any], transport: str) -> dic
 def _collect_scope_skip(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for item in items:
-        if str(item.get("issue_type") or "") != "scope_skip":
+        if not _is_scope_skip_item(item):
             continue
         result.append(item)
     return result
@@ -199,7 +226,8 @@ def _cleanliness(payload: dict[str, Any]) -> tuple[str, list[str]]:
 
 
 def _append_blocklist(lines: list[str], items: list[dict[str, Any]], title: str) -> None:
-    lines.append(f"### {title}")
+    if title:
+        lines.append(f"### {title}")
     if not items:
         lines.append("- (none)")
         return
@@ -257,7 +285,7 @@ def _write_report(
         for item in command_payload.get("results", [])
         if isinstance(item, dict) and item.get("status") == "blocker"
     ]
-    all_issues = _collect_items_by_status(tool_items, "issue") + [
+    all_issues = [item for item in tool_items if str(item.get("status") or "") == "issue" and not _is_scope_skip_item(item)] + [
         item
         for item in command_payload.get("results", [])
         if isinstance(item, dict) and item.get("status") == "issue"
@@ -378,17 +406,6 @@ def _write_report(
         for reason in cleanup_reasons:
             lines.append(f"  - {reason}")
 
-    lines.append("")
-    lines.extend(
-        [
-            "## 命令层 block / issue 一览",
-            f"- command_total: {command_summary['total']}",
-            f"- command_pass: {command_summary['pass']}",
-            f"- command_issue: {command_summary['issue']}",
-            f"- command_blocker: {command_summary['blocker']}",
-        ]
-    )
-
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -406,9 +423,9 @@ def main() -> int:
     args = _parse_args()
     root = _tools_root()
 
-    command_path = Path(args.command_json)
-    tool_path = Path(args.tool_json)
-    usability_path = Path(args.usability_json)
+    command_path = _resolve_cli_path(root, args.command_json)
+    tool_path = _resolve_cli_path(root, args.tool_json)
+    usability_path = _resolve_cli_path(root, args.usability_json)
     if not command_path.is_absolute():
         command_path = root / command_path
     if not tool_path.is_absolute():
@@ -433,8 +450,9 @@ def main() -> int:
 
     _write_report(out_path, command_payload, tool_payload)
 
-    detailed_out = Path(args.detailed_out)
-    if str(detailed_out).strip():
+    detailed_arg = str(args.detailed_out or "").strip()
+    if detailed_arg:
+        detailed_out = Path(detailed_arg)
         if not detailed_out.is_absolute():
             detailed_out = out_path.parent / detailed_out
     else:
@@ -466,3 +484,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

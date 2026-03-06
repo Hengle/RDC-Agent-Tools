@@ -324,6 +324,7 @@ class SessionManager:
             props = await self._offload(state.controller.GetAPIProperties)
             api = _map_graphics_api(props)
             state.capabilities.api = api
+            state.capabilities.shader_debug_supported = bool(getattr(props, "shaderDebugging", False))
             driver_name = str(getattr(props, "localRenderer", ""))
             if hasattr(props, "driverVersion"):
                 driver_version = str(props.driverVersion)

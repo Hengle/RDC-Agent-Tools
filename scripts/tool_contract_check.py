@@ -11,9 +11,9 @@ import subprocess
 import sys
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 SCRIPT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,19 +33,22 @@ SESSION_ERROR_SNIPPETS = (
     "capture_file_id",
     "No active session",
 )
-ENV_ISSUE_CODES = {"runtime_error", "not_supported", "not_found", "validation_error"}
-ENV_ISSUE_MESSAGE_SNIPPETS = (
+REMOTE_APP_DEPENDENCY_SNIPPETS = (
     "requires_remote_device",
     "requires_app_integration",
     "App API requires in-process RenderDoc instrumentation",
     "Remote target interaction requires a live RenderDoc remote endpoint",
-    "not available in this build",
-    "On-host shader compilation is not configured",
-    "Shader binary extraction is not available",
-    "DebugPixel returned invalid trace",
-    "Counter not found:",
-    "Missing required parameter",
 )
+
+
+def _resolve_cli_path(root: Path, raw_path: str) -> Path:
+    text = str(raw_path or "").strip()
+    candidate = Path(text)
+    windows_candidate = PureWindowsPath(text)
+    if candidate.is_absolute() or (windows_candidate.drive and windows_candidate.root):
+        return candidate
+    return (root / candidate).resolve()
+
 SAMPLE_COMPATIBILITY_SNIPPETS = (
     "DebugPixel returned invalid trace",
     "invalid trace",
@@ -108,6 +111,17 @@ def _payload_error(payload: dict[str, Any] | None) -> tuple[str, str]:
     return legacy_code, message
 
 
+def _payload_error_details(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    err = payload.get("error")
+    if isinstance(err, dict):
+        details = err.get("details")
+        return details if isinstance(details, dict) else {}
+    details = payload.get("details")
+    return details if isinstance(details, dict) else {}
+
+
 def _coalesce_error(
     payload: dict[str, Any] | None,
     raw: str | None,
@@ -144,14 +158,213 @@ def _classify_transport_impact(tool: str, matrix: str, transport: str) -> str:
     return "full flow"
 
 
-def _is_env_dependency_error(message: str, code: str) -> bool:
+def _is_remote_app_dependency_error(message: str, code: str) -> bool:
     haystack = " ".join([str(code or ""), str(message or "")]).lower()
-    return any(snippet in haystack for snippet in ENV_ISSUE_MESSAGE_SNIPPETS)
+    return any(snippet.lower() in haystack for snippet in REMOTE_APP_DEPENDENCY_SNIPPETS)
 
 
 def _is_sample_compatibility_error(message: str, code: str) -> bool:
     haystack = " ".join([str(code or ""), str(message or "")]).lower()
     return any(snippet in haystack for snippet in SAMPLE_COMPATIBILITY_SNIPPETS)
+
+
+def _is_scope_skip_item(item: dict[str, Any]) -> bool:
+    status = str(item.get("status") or "")
+    if status == "scope_skip":
+        return True
+    return str(item.get("issue_type") or "") == "scope_skip"
+
+
+def _scope_skip_classification(
+    tool: str,
+    payload: dict[str, Any] | None,
+    message: str,
+    code: str,
+    transport_scope: str,
+) -> tuple[str, str, str, str, str, str] | None:
+    lower_msg = str(message or "").lower()
+    details = _payload_error_details(payload)
+    capability = str(details.get("capability") or "").strip().lower()
+    optional = bool(details.get("optional", False))
+
+    if "unknown remote_id" in lower_msg or _is_remote_app_dependency_error(message, code) or tool.startswith("rd.app."):
+        return (
+            "scope_skip",
+            message or "remote/app dependency insufficient",
+            code or "remote_app_dependency",
+            "remote_app_dependency",
+            "Keep app/remote dependency gaps as scope_skip in local smoke runs",
+            "only affects app/remote dependency path",
+        )
+
+    if _is_sample_compatibility_error(message, code):
+        return (
+            "scope_skip",
+            message or "sample compatibility issue",
+            code or "sample_compatibility",
+            "sample_compatibility",
+            "Keep sample-specific replay limitations independent from issue/blocker counts",
+            "only affects sample-specific replay path",
+        )
+
+    if optional and capability == "mesh_post_transform":
+        return (
+            "scope_skip",
+            message or "post-vs/gs extraction unavailable in this build",
+            code or "capability_boundary",
+            "capability_boundary",
+            "Treat build capability gaps as scope_skip instead of local chain failures",
+            "only affects mesh post-transform extraction",
+        )
+
+    if optional and capability == "shader_binary_export":
+        return (
+            "scope_skip",
+            message or "shader binary extraction unavailable in this replay backend",
+            code or "capability_boundary",
+            "capability_boundary",
+            "Keep shader binary extraction backend gaps out of issue/blocker counts",
+            "only affects shader binary export path",
+        )
+
+    if optional and capability == "shader_compile":
+        return (
+            "scope_skip",
+            message or "on-host shader compilation unavailable",
+            code or "capability_boundary",
+            "capability_boundary",
+            "Keep host shader compiler availability as scope_skip for local smoke",
+            "only affects shader compilation path",
+        )
+
+    if tool == "rd.perf.describe_counter" and "counter not found" in lower_msg:
+        return (
+            "scope_skip",
+            message or "counter unavailable for this sample",
+            code or "capability_boundary",
+            "capability_boundary",
+            "Use an enumerated counter_id when available; otherwise keep the perf detail path as scope_skip",
+            "only affects perf counter detail path",
+        )
+
+    if tool in {"rd.mesh.get_post_vs_data", "rd.mesh.get_post_gs_data"} and "post-vs/gs extraction is not available" in lower_msg:
+        return (
+            "scope_skip",
+            message or "post-vs/gs extraction unavailable in this build",
+            code or "capability_boundary",
+            "capability_boundary",
+            "Treat build capability gaps as scope_skip instead of local chain failures",
+            "only affects mesh post-transform extraction",
+        )
+
+    if tool in {"rd.shader.extract_binary", "rd.shader.save_binary"} and "shader binary extraction is not available" in lower_msg:
+        return (
+            "scope_skip",
+            message or "shader binary extraction unavailable in this replay backend",
+            code or "capability_boundary",
+            "capability_boundary",
+            "Keep shader binary extraction backend gaps out of issue/blocker counts",
+            "only affects shader binary export path",
+        )
+
+    if tool == "rd.shader.compile" and "on-host shader compilation is not configured" in lower_msg:
+        return (
+            "scope_skip",
+            message or "on-host shader compilation unavailable",
+            code or "capability_boundary",
+            "capability_boundary",
+            "Keep host shader compiler availability as scope_skip for local smoke",
+            "only affects shader compilation path",
+        )
+
+    if tool in {"rd.shader.get_debug_state", "rd.debug.step", "rd.debug.continue", "rd.debug.get_variables"} and (
+        "unknown shader_debug_id" in lower_msg or "no shader_debug_id" in lower_msg
+    ):
+        return (
+            "scope_skip",
+            message or "shader debug session unavailable",
+            code or "sample_compatibility",
+            "sample_compatibility",
+            "Keep dependent shader debug tools as scope_skip when a debug trace cannot be created",
+            "only affects shader debug chain",
+        )
+
+    return None
+
+
+def _make_scope_skip_item(
+    *,
+    tool: str,
+    transport: str,
+    matrix: str,
+    reason: str,
+    issue_type: str,
+    fix_hint: str,
+    impact_scope: str,
+    args: dict[str, Any],
+    error_code: str,
+    evidence: str,
+    repro_command: str,
+    contract: bool,
+    sample_compatibility: bool | None = None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "tool": tool,
+        "transport": transport,
+        "matrix": matrix,
+        "status": "scope_skip",
+        "reason": reason,
+        "issue_type": issue_type,
+        "fix_hint": fix_hint,
+        "impact_scope": impact_scope,
+        "ok": False,
+        "callable": False,
+        "contract": contract,
+        "args": args,
+        "error_code": error_code,
+        "evidence": evidence,
+        "repro_command": repro_command,
+    }
+    if sample_compatibility is not None:
+        item["sample_compatibility"] = sample_compatibility
+    return item
+
+
+def _make_covered_pass_item(
+    *,
+    tool: str,
+    transport: str,
+    matrix: str,
+    covered_by_tool: str,
+    reason: str,
+    issue_type: str,
+    fix_hint: str,
+    impact_scope: str,
+    args: dict[str, Any],
+    error_code: str,
+    evidence: str,
+    repro_command: str,
+) -> dict[str, Any]:
+    return {
+        "tool": tool,
+        "transport": transport,
+        "matrix": matrix,
+        "status": "pass",
+        "reason": reason,
+        "issue_type": issue_type,
+        "fix_hint": fix_hint,
+        "impact_scope": impact_scope,
+        "ok": False,
+        "callable": False,
+        "contract": False,
+        "args": args,
+        "error_code": error_code,
+        "evidence": evidence,
+        "repro_command": repro_command,
+        "covered_by_tool": covered_by_tool,
+        "covered_by_status": "scope_skip",
+        "covered_scope_skip": True,
+    }
 
 
 def _is_session_related_failure(payload: dict[str, Any] | None) -> bool:
@@ -226,13 +439,28 @@ class SampleState:
     rdc_path: Path
     session_id: str | None = None
     capture_file_id: str | None = None
-    event_id: int = 1
+    event_id: int = 0
     texture_id: str | None = None
     resource_id: str | None = None
     buffer_id: str | None = None
     shader_id: str | None = None
+    shader_debug_id: str | None = None
+    shader_debug_error_code: str = ""
+    shader_debug_issue_type: str = ""
+    shader_debug_reason: str = ""
+    debug_x: int = 1
+    debug_y: int = 1
+    debug_sample: int | None = None
+    debug_view: int | None = None
+    debug_primitive: int | None = None
+    debug_pc: int = 0
+    debug_target: dict[str, Any] = field(default_factory=dict)
+    debug_params: dict[str, Any] = field(default_factory=dict)
     remote_id: str | None = None
-    counter_id: int = 0
+    counter_id: int | None = None
+    counter_error_code: str = ""
+    counter_issue_type: str = ""
+    counter_reason: str = ""
     sample_compatibility: bool = True
 
 
@@ -359,7 +587,7 @@ async def _ensure_context(
             if _is_sample_compatibility_error(message, code):
                 state.sample_compatibility = False
                 return
-            if _is_env_dependency_error(message, code):
+            if _is_remote_app_dependency_error(message, code):
                 return
             state.capture_file_id = None
 
@@ -379,13 +607,32 @@ async def _ensure_context(
             if _is_sample_compatibility_error(message, code):
                 state.sample_compatibility = False
                 return
-            if _is_env_dependency_error(message, code):
+            if _is_remote_app_dependency_error(message, code):
                 return
             state.session_id = None
 
     if need_capture and state.session_id:
+        state.counter_id = None
+        state.counter_error_code = ""
+        state.counter_issue_type = ""
+        state.counter_reason = ""
+        state.event_id = 0
+        state.shader_debug_id = None
+        state.shader_debug_error_code = ""
+        state.shader_debug_issue_type = ""
+        state.shader_debug_reason = ""
+        state.debug_x = 1
+        state.debug_y = 1
+        state.debug_sample = None
+        state.debug_view = None
+        state.debug_primitive = None
+        state.debug_pc = 0
+        state.debug_target = {}
+        state.debug_params = {}
+
         await call_fn("rd.replay.set_frame", {"session_id": state.session_id, "frame_index": 0}, timeout_s=20.0)
 
+        draw_candidates: list[dict[str, Any]] = []
         actions_payload, _, _ = await call_fn(
             "rd.event.get_actions",
             {"session_id": state.session_id, "include_markers": True, "include_drawcalls": True},
@@ -395,19 +642,8 @@ async def _ensure_context(
             actions = _payload_data(actions_payload).get("actions", [])
             if isinstance(actions, list):
                 fallback_event = None
-
-                def _walk(nodes: list[Any]) -> list[dict[str, Any]]:
-                    out: list[dict[str, Any]] = []
-                    for node in nodes:
-                        if not isinstance(node, dict):
-                            continue
-                        out.append(node)
-                        children = node.get("children")
-                        if isinstance(children, list):
-                            out.extend(_walk(children))
-                    return out
-
-                for item in _walk(actions):
+                first_draw_event = None
+                for item in _walk_action_nodes(actions):
                     raw_event_id = item.get("event_id")
                     try:
                         event_id = int(raw_event_id)
@@ -418,11 +654,30 @@ async def _ensure_context(
                     if fallback_event is None:
                         fallback_event = event_id
                     flags = item.get("flags")
+                    raw_outputs = item.get("outputs")
+                    outputs = [
+                        str(value)
+                        for value in raw_outputs
+                        if str(value) and str(value) != "ResourceId::0"
+                    ] if isinstance(raw_outputs, list) else []
                     if isinstance(flags, dict) and bool(flags.get("is_draw")):
-                        state.event_id = event_id
-                        break
+                        if first_draw_event is None:
+                            first_draw_event = event_id
+                        if outputs:
+                            draw_candidates.append({"event_id": event_id, "outputs": outputs})
+                            if state.event_id <= 0 or state.event_id == first_draw_event:
+                                state.event_id = event_id
+                        elif state.event_id <= 0:
+                            state.event_id = event_id
                 if fallback_event is not None and state.event_id <= 0:
                     state.event_id = fallback_event
+
+        if state.event_id > 0:
+            await call_fn(
+                "rd.event.set_active",
+                {"session_id": state.session_id, "event_id": int(state.event_id)},
+                timeout_s=20.0,
+            )
 
         tx_payload, _, _ = await call_fn(
             "rd.resource.list_textures",
@@ -435,6 +690,11 @@ async def _ensure_context(
                 t0 = textures[0]
                 state.texture_id = str(t0.get("texture_id") or t0.get("resource_id") or "")
                 state.resource_id = state.texture_id or state.resource_id
+        if draw_candidates:
+            preferred_texture = str(draw_candidates[0]["outputs"][0])
+            if preferred_texture:
+                state.texture_id = preferred_texture
+                state.resource_id = preferred_texture
 
         bu_payload, _, _ = await call_fn(
             "rd.resource.list_buffers",
@@ -456,6 +716,130 @@ async def _ensure_context(
             shader = _payload_data(sh_payload).get("shader", {})
             if isinstance(shader, dict):
                 state.shader_id = str(shader.get("shader_id") or "")
+        elif sh_payload:
+            code, message = _payload_error(sh_payload)
+            state.shader_debug_error_code = code or "shader_unavailable"
+            state.shader_debug_issue_type = "capability_boundary"
+            state.shader_debug_reason = message or "shader metadata unavailable"
+
+        counter_payload, _, _ = await call_fn(
+            "rd.perf.enumerate_counters",
+            {"session_id": state.session_id},
+            timeout_s=20.0,
+        )
+        if counter_payload and counter_payload.get("ok"):
+            counters = _payload_data(counter_payload).get("counters", [])
+            if isinstance(counters, list):
+                for counter in counters:
+                    if not isinstance(counter, dict):
+                        continue
+                    try:
+                        state.counter_id = int(counter.get("counter_id"))
+                    except Exception:
+                        continue
+                    if state.counter_id > 0:
+                        break
+                if state.counter_id is None:
+                    state.counter_error_code = "counter_unavailable"
+                    state.counter_issue_type = "capability_boundary"
+                    state.counter_reason = "no usable counter_id returned by enumerate_counters"
+        elif counter_payload:
+            code, message = _payload_error(counter_payload)
+            state.counter_error_code = code or "counter_unavailable"
+            state.counter_issue_type = "capability_boundary"
+            state.counter_reason = message or "performance counters unavailable"
+
+        if state.shader_id:
+            debug_candidate, last_debug_code, last_debug_message = await _pick_shader_debug_candidate(
+                call_fn,
+                state,
+                draw_candidates,
+            )
+            debug_payload = None
+            if debug_candidate is not None:
+                state.event_id = int(debug_candidate["event_id"])
+                state.texture_id = str(debug_candidate["texture_id"])
+                state.resource_id = state.texture_id or state.resource_id
+                state.debug_params = dict(debug_candidate["params"])
+                state.debug_target = dict(state.debug_params.get("target") or {})
+                state.debug_x = int(state.debug_params.get("x", 1))
+                state.debug_y = int(state.debug_params.get("y", 1))
+                state.debug_sample = state.debug_params.get("sample")
+                state.debug_view = state.debug_params.get("view")
+                state.debug_primitive = state.debug_params.get("primitive")
+                debug_payload = debug_candidate["payload"]
+            else:
+                fallback_params: dict[str, Any] = {"x": int(state.debug_x), "y": int(state.debug_y)}
+                if state.texture_id:
+                    fallback_params["target"] = {"texture_id": state.texture_id}
+                state.debug_params = dict(fallback_params)
+                state.debug_target = dict(fallback_params.get("target") or {})
+                debug_payload, _, _ = await call_fn(
+                    "rd.shader.debug_start",
+                    {
+                        "session_id": state.session_id,
+                        "mode": "pixel",
+                        "event_id": int(state.event_id or 1),
+                        "params": fallback_params,
+                        "timeout_ms": 0,
+                    },
+                    timeout_s=25.0,
+                )
+
+            if debug_payload and debug_payload.get("ok"):
+                data = _payload_data(debug_payload)
+                state.shader_debug_id = str(debug_payload.get("shader_debug_id") or data.get("shader_debug_id") or "")
+                if not state.shader_debug_id:
+                    state.shader_debug_id = None
+                initial_state = data.get("initial_state", {})
+                if isinstance(initial_state, dict):
+                    try:
+                        state.debug_pc = int(initial_state.get("pc") or 0)
+                    except Exception:
+                        state.debug_pc = 0
+                resolved_context = data.get("resolved_context", {})
+                if isinstance(resolved_context, dict):
+                    try:
+                        state.event_id = int(resolved_context.get("event_id") or state.event_id or 0)
+                    except Exception:
+                        pass
+                    target_ctx = resolved_context.get("target")
+                    if isinstance(target_ctx, dict):
+                        state.debug_target = dict(target_ctx)
+                    for key, attr in (("x", "debug_x"), ("y", "debug_y"), ("sample", "debug_sample"), ("view", "debug_view"), ("primitive", "debug_primitive")):
+                        if key in resolved_context:
+                            setattr(state, attr, resolved_context.get(key))
+                if state.session_id:
+                    shader_refresh_payload, _, _ = await call_fn(
+                        "rd.pipeline.get_shader",
+                        {"session_id": state.session_id, "stage": "ps"},
+                        timeout_s=20.0,
+                    )
+                    if shader_refresh_payload and shader_refresh_payload.get("ok"):
+                        shader = _payload_data(shader_refresh_payload).get("shader", {})
+                        if isinstance(shader, dict):
+                            refreshed_shader_id = str(shader.get("shader_id") or "")
+                            if refreshed_shader_id:
+                                state.shader_id = refreshed_shader_id
+            elif debug_payload:
+                code, message = _payload_error(debug_payload)
+                state.shader_debug_error_code = code or "shader_debug_unavailable"
+                state.shader_debug_issue_type = (
+                    "sample_compatibility" if _is_sample_compatibility_error(message, code) else "capability_boundary"
+                )
+                state.shader_debug_reason = message or "shader debug trace unavailable"
+            else:
+                state.shader_debug_error_code = last_debug_code or "shader_debug_unavailable"
+                state.shader_debug_issue_type = (
+                    "sample_compatibility"
+                    if _is_sample_compatibility_error(last_debug_message, last_debug_code)
+                    else "capability_boundary"
+                )
+                state.shader_debug_reason = last_debug_message or "shader debug trace unavailable"
+        elif not state.shader_debug_reason:
+            state.shader_debug_error_code = "shader_unavailable"
+            state.shader_debug_issue_type = "capability_boundary"
+            state.shader_debug_reason = "pixel shader unavailable from current pipeline state"
 
     if need_remote and not state.remote_id:
         remote_payload, _, _ = await call_fn(
@@ -473,6 +857,8 @@ async def _ensure_context(
 def _default_for_id(param: str, state: SampleState) -> Any:
     if param == "counter_id":
         return state.counter_id
+    if param == "shader_debug_id":
+        return state.shader_debug_id
     known = {
         "session_id": state.session_id,
         "capture_file_id": state.capture_file_id,
@@ -482,6 +868,7 @@ def _default_for_id(param: str, state: SampleState) -> Any:
         "vertex_buffer_id": state.buffer_id,
         "index_buffer_id": state.buffer_id,
         "shader_id": state.shader_id,
+        "shader_debug_id": state.shader_debug_id,
         "remote_id": state.remote_id,
         "target_id": "target_dummy",
         "capture_id": "capture_dummy",
@@ -509,6 +896,191 @@ def _ensure_fixture_inputs(files: dict[str, Path]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.write_bytes(payload)
+
+
+def _walk_action_nodes(nodes: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        out.append(node)
+        children = node.get("children")
+        if isinstance(children, list):
+            out.extend(_walk_action_nodes(children))
+    return out
+
+
+def _sample_positions(extent: int) -> list[int]:
+    extent = max(int(extent), 1)
+    if extent <= 2:
+        return sorted({0, max(0, extent - 1)})
+    return sorted({0, max(0, extent // 2), max(0, extent - 1)})
+
+
+def _valid_primitive_id(value: Any) -> int | None:
+    try:
+        primitive = int(value)
+    except Exception:
+        return None
+    if primitive < 0 or primitive == 0xFFFFFFFF:
+        return None
+    return primitive
+
+
+async def _pick_shader_debug_candidate(
+    call_fn: Any,
+    state: SampleState,
+    draw_candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str, str]:
+    last_code = ""
+    last_message = ""
+
+    for candidate in draw_candidates[:18]:
+        try:
+            event_id = int(candidate.get("event_id") or 0)
+        except Exception:
+            continue
+        if event_id <= 0:
+            continue
+        outputs = [
+            str(value)
+            for value in candidate.get("outputs", [])
+            if str(value) and str(value) != "ResourceId::0"
+        ]
+        if not outputs:
+            continue
+
+        for texture_id in outputs[:2]:
+            details_payload, _, _ = await call_fn(
+                "rd.resource.get_details",
+                {"session_id": state.session_id, "resource_id": texture_id},
+                timeout_s=20.0,
+            )
+            if not details_payload or not details_payload.get("ok"):
+                continue
+            details = _payload_data(details_payload).get("details", {})
+            if not isinstance(details, dict):
+                continue
+            width = int(details.get("width") or 0)
+            height = int(details.get("height") or 0)
+            if width <= 0 or height <= 0:
+                continue
+
+            for x in _sample_positions(width):
+                for y in _sample_positions(height):
+                    history_payload, _, _ = await call_fn(
+                        "rd.debug.pixel_history",
+                        {
+                            "session_id": state.session_id,
+                            "x": int(x),
+                            "y": int(y),
+                            "target": {"texture_id": texture_id},
+                        },
+                        timeout_s=20.0,
+                    )
+                    if not history_payload or not history_payload.get("ok"):
+                        continue
+                    history = _payload_data(history_payload).get("history", [])
+                    if not isinstance(history, list):
+                        continue
+
+                    matches: list[dict[str, Any]] = []
+                    for item in history:
+                        if not isinstance(item, dict):
+                            continue
+                        try:
+                            hist_event = int(item.get("event_id") or 0)
+                        except Exception:
+                            continue
+                        if hist_event != event_id:
+                            continue
+                        if item.get("passed") is False:
+                            continue
+                        if bool(item.get("shader_discarded")) or bool(item.get("unbound_ps")):
+                            continue
+                        matches.append(item)
+
+                    if not matches:
+                        continue
+
+                    params: dict[str, Any] = {
+                        "x": int(x),
+                        "y": int(y),
+                        "sample": 0,
+                        "view": 0,
+                        "target": {"texture_id": texture_id},
+                    }
+                    primitive = None
+                    for item in matches:
+                        primitive = _valid_primitive_id(item.get("primitive_id"))
+                        if primitive is not None:
+                            params["primitive"] = primitive
+                            break
+
+                    debug_payload, _, _ = await call_fn(
+                        "rd.shader.debug_start",
+                        {
+                            "session_id": state.session_id,
+                            "mode": "pixel",
+                            "event_id": event_id,
+                            "params": params,
+                            "timeout_ms": 0,
+                        },
+                        timeout_s=25.0,
+                    )
+                    if debug_payload and debug_payload.get("ok"):
+                        return (
+                            {
+                                "event_id": event_id,
+                                "texture_id": texture_id,
+                                "params": params,
+                                "payload": debug_payload,
+                            },
+                            last_code,
+                            last_message,
+                        )
+                    if debug_payload:
+                        last_code, last_message = _payload_error(debug_payload)
+
+    return None, last_code, last_message
+
+
+def _preflight_scope_skip(
+    tool: str,
+    param_names: list[str],
+    state: SampleState,
+) -> tuple[str, str, str, str, str] | None:
+    if tool == "rd.perf.describe_counter" and state.counter_id is None:
+        return (
+            state.counter_reason or "performance counter unavailable",
+            state.counter_error_code or "counter_unavailable",
+            state.counter_issue_type or "capability_boundary",
+            "Use an enumerated counter_id when available; otherwise keep perf describe as scope_skip",
+            "only affects perf counter detail path",
+        )
+
+    return None
+
+
+def _covered_preflight_pass(
+    tool: str,
+    param_names: list[str],
+    state: SampleState,
+) -> tuple[str, str, str, str, str, str] | None:
+    if "shader_debug_id" not in param_names or state.shader_debug_id:
+        return None
+    return (
+        "rd.shader.debug_start",
+        (
+            "Covered by upstream rd.shader.debug_start scope_skip: "
+            + (state.shader_debug_reason or "shader debug session unavailable")
+        ),
+        state.shader_debug_error_code or "shader_debug_unavailable",
+        state.shader_debug_issue_type or "sample_compatibility",
+        "Count shader debug sample limits once at rd.shader.debug_start; keep dependent tools as covered passes",
+        "only affects shader debug chain",
+    )
+
 
 def _build_args(tool: str, param_names: list[str], state: SampleState, files: dict[str, Path]) -> dict[str, Any]:
     args: dict[str, Any] = {}
@@ -557,8 +1129,10 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             args[param] = 0
         elif param in {"event_id", "event_a", "event_b"}:
             args[param] = int(state.event_id or 1)
-        elif param in {"x", "y"}:
-            args[param] = 1
+        elif param == "x":
+            args[param] = int(state.debug_x)
+        elif param == "y":
+            args[param] = int(state.debug_y)
         elif param in {
             "mip",
             "slice",
@@ -574,7 +1148,6 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             "max_lines",
             "num_frames",
             "capture_delay_ms",
-            "timeout_ms",
             "context_lines",
             "stride",
             "rt_index",
@@ -585,6 +1158,10 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             "older_than_ms",
             "max_total_bytes",
         }:
+            args[param] = 0
+        elif param == "timeout_ms":
+            args[param] = 50 if tool == "rd.debug.run_to" else 0
+        elif param in {"view", "instance", "view_index"}:
             args[param] = 0
         elif param == "bins":
             args[param] = 16
@@ -617,6 +1194,10 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
         elif param == "target":
             if tool in {"rd.shader.compile", "rd.shader.get_disassembly"}:
                 args[param] = "ps_5_0"
+            elif tool == "rd.debug.run_to":
+                args[param] = {"pc": int(state.debug_pc)}
+            elif state.debug_target:
+                args[param] = dict(state.debug_target)
             else:
                 args[param] = {"texture_id": state.texture_id} if state.texture_id else {}
         elif param == "subresource":
@@ -634,11 +1215,14 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
         elif param == "counter_ids":
             args[param] = []
         elif param == "counter_id":
-            args[param] = int(state.counter_id or 0)
+            if state.counter_id is not None:
+                args[param] = int(state.counter_id)
         elif param == "layout":
             args[param] = {"stride": 4, "fields": [{"name": "v", "type": "u32", "offset": 0}]}
         elif param == "file_format":
             args[param] = "png"
+        elif param == "detail_level":
+            args[param] = "full"
         elif param == "connection":
             args[param] = {"pid": 0}
         elif param == "host":
@@ -672,11 +1256,11 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
         elif param == "replacement":
             args[param] = {"stage": "ps", "shader_id": state.shader_id or "0"}
         elif param == "breakpoints":
-            args[param] = []
+            args[param] = [{"pc": int(state.debug_pc)}]
         elif param == "params":
-            args[param] = {"x": 1, "y": 1}
+            args[param] = dict(state.debug_params) if state.debug_params else {"x": int(state.debug_x), "y": int(state.debug_y)}
         elif param == "validation":
-            args[param] = {"x": 1, "y": 1}
+            args[param] = {"x": int(state.debug_x), "y": int(state.debug_y)}
         elif param == "description":
             args[param] = "contract test"
         elif param == "backend_type":
@@ -727,6 +1311,26 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
     return {k: v for k, v in args.items() if v is not None}
 
 
+def _update_debug_progress(state: SampleState, payload: dict[str, Any] | None) -> None:
+    if not isinstance(payload, dict) or not bool(payload.get("ok")):
+        return
+    data = _payload_data(payload)
+    if not isinstance(data, dict):
+        return
+    initial_state = data.get("initial_state")
+    if isinstance(initial_state, dict):
+        try:
+            state.debug_pc = int(initial_state.get("pc") or state.debug_pc)
+        except Exception:
+            pass
+    state_payload = data.get("state")
+    if isinstance(state_payload, dict):
+        try:
+            state.debug_pc = int(state_payload.get("pc") or state.debug_pc)
+        except Exception:
+            pass
+
+
 def _classify_result(
     tool: str,
     payload: dict[str, Any] | None,
@@ -769,35 +1373,9 @@ def _classify_result(
     if bool(payload.get("ok")):
         return "pass", "", "", "", "", transport_scope
 
-    if "unknown remote_id" in lower_msg:
-        return (
-            "issue",
-            message or "remote_id unavailable in this environment",
-            code or "remote_app_dependency",
-            "remote_app_dependency",
-            "remote tools require a live remote endpoint or mock workflow",
-            "only affects remote_id scope",
-        )
-
-    if _is_sample_compatibility_error(message, code):
-        return (
-            "issue",
-            message or "sample compatibility issue",
-            "sample_compatibility",
-            "sample_compatibility",
-            "Keep remote sample compatibility problems independent from toolchain failure classification",
-            "only affects remote matrix replay path",
-        )
-
-    if _is_env_dependency_error(message, code) or tool.startswith("rd.remote.") or tool.startswith("rd.app."):
-        return (
-            "issue",
-            message or "remote/app dependency insufficient",
-            code or "dependency",
-            "remote_app_dependency",
-            "Prompt dependency gap and next action: remote endpoint / app integration required",
-            transport_scope,
-        )
+    scope_skip = _scope_skip_classification(tool, payload, message, code, transport_scope)
+    if scope_skip is not None:
+        return scope_skip
 
     if "unknown session_id" in lower_msg or "no session_id" in lower_msg or "no active session" in lower_msg:
         return (
@@ -894,9 +1472,10 @@ def _transport_summary(items: list[dict[str, Any]]) -> dict[str, int]:
     return {
         "total": len(items),
         "pass": sum(1 for item in items if item.get("status") == "pass"),
-        "issue": sum(1 for item in items if item.get("status") == "issue"),
+        "issue": sum(1 for item in items if item.get("status") == "issue" and not _is_scope_skip_item(item)),
         "blocker": sum(1 for item in items if item.get("status") == "blocker"),
-        "scope_skip": sum(1 for item in items if str(item.get("issue_type") or "") == "scope_skip"),
+        "scope_skip": sum(1 for item in items if _is_scope_skip_item(item)),
+        "covered_pass": sum(1 for item in items if item.get("status") == "pass" and bool(item.get("covered_scope_skip"))),
         "callable_pass": sum(1 for item in items if bool(item.get("callable"))),
         "contract_pass": sum(1 for item in items if bool(item.get("contract"))),
         "ok_true": sum(1 for item in items if bool(item.get("ok"))),
@@ -919,6 +1498,7 @@ def _write_markdown_report(result: dict[str, Any], out_path: Path) -> None:
 
     all_blockers: list[dict[str, Any]] = []
     all_issues: list[dict[str, Any]] = []
+    all_scope_skips: list[dict[str, Any]] = []
     for transport_name in ("mcp", "daemon"):
         t_payload = transports.get(transport_name)
         if not isinstance(t_payload, dict):
@@ -932,6 +1512,7 @@ def _write_markdown_report(result: dict[str, Any], out_path: Path) -> None:
                 f"- issue: {summary.get('issue', 0)}",
                 f"- blocker: {summary.get('blocker', 0)}",
                 f"- scope_skip: {summary.get('scope_skip', 0)}",
+                f"- covered_pass: {summary.get('covered_pass', 0)}",
                 f"- callable_pass: {summary.get('callable_pass', 0)}",
                 f"- contract_pass: {summary.get('contract_pass', 0)}",
                 f"- ok_true: {summary.get('ok_true', 0)}",
@@ -952,6 +1533,9 @@ def _write_markdown_report(result: dict[str, Any], out_path: Path) -> None:
             for item in items:
                 if not isinstance(item, dict):
                     continue
+                if _is_scope_skip_item(item):
+                    all_scope_skips.append(item | {"transport": transport_name})
+                    continue
                 status = str(item.get("status") or "")
                 if status == "blocker":
                     all_blockers.append(item | {"transport": transport_name})
@@ -971,6 +1555,26 @@ def _write_markdown_report(result: dict[str, Any], out_path: Path) -> None:
             )
             if item.get("error_code"):
                 lines.append(f"  - error_code: `{item.get('error_code')}`")
+            if item.get("repro_command"):
+                lines.append(f"  - repro: `{item.get('repro_command')}`")
+            if item.get("fix_hint"):
+                lines.append(f"  - fix: {item.get('fix_hint')}")
+
+    lines.extend(["", "## Scope Skips"])
+    if not all_scope_skips:
+        lines.append("- (none)")
+    else:
+        for item in all_scope_skips:
+            lines.append(
+                (
+                    f"- `{item.get('transport')}` `{item.get('tool')}` ({item.get('matrix')}): "
+                    f"{item.get('reason') or 'unknown'}"
+                ),
+            )
+            if item.get("issue_type"):
+                lines.append(f"  - issue_type: {item.get('issue_type')}")
+            if item.get("impact_scope"):
+                lines.append(f"  - impact_scope: {item.get('impact_scope')}")
             if item.get("repro_command"):
                 lines.append(f"  - repro: `{item.get('repro_command')}`")
             if item.get("fix_hint"):
@@ -1054,29 +1658,26 @@ async def _run_transport_mcp(
                 for name in _ordered_tool_names(names):
                     param_names = params_map.get(name, [])
                     matrix = "remote" if _is_remote_matrix_tool(name, param_names) else "local"
+                    state = states[matrix]
                     if skip_remote and matrix == "remote":
                         args = _build_args(name, param_names, states["local"], files)
                         items.append(
-                            {
-                                "tool": name,
-                                "transport": "mcp",
-                                "matrix": matrix,
-                                "status": "issue",
-                                "reason": "local-only mode: remote matrix skipped",
-                                "issue_type": "scope_skip",
-                                "fix_hint": "Run remote workflow in dedicated remote-only smoke pass.",
-                                "impact_scope": "local mode",
-                                "ok": False,
-                                "callable": False,
-                                "contract": False,
-                                "args": args,
-                                "error_code": "remote_skipped_local_mode",
-                                "evidence": "tool requires remote scope and has been skipped for local-only run",
-                                "repro_command": f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
-                            },
+                            _make_scope_skip_item(
+                                tool=name,
+                                transport="mcp",
+                                matrix=matrix,
+                                reason="local-only mode: remote matrix skipped",
+                                issue_type="scope_skip",
+                                fix_hint="Run remote workflow in dedicated remote-only smoke pass.",
+                                impact_scope="local mode",
+                                args=args,
+                                error_code="remote_skipped_local_mode",
+                                evidence="tool requires remote scope and has been skipped for local-only run",
+                                repro_command=f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
+                                contract=False,
+                            ),
                         )
                         continue
-                    state = states[matrix]
                     requires_capture = ("session_id" in param_names) or ("capture_file_id" in param_names)
                     had_remote_id = bool(state.remote_id)
                     if matrix == "remote" and not state.remote_id:
@@ -1093,24 +1694,65 @@ async def _run_transport_mcp(
                     if matrix == "remote" and requires_capture and state.sample_compatibility is False:
                         args = _build_args(name, param_names, state, files)
                         items.append(
-                            {
-                                "tool": name,
-                                "transport": "mcp",
-                                "matrix": matrix,
-                                "status": "issue",
-                                "reason": "sample compatibility issue for remote sample; skip replay-bound tool",
-                                "issue_type": "sample_compatibility",
-                                "fix_hint": "Keep remote matrix replay path as sample-specific; do not mark as remote toolchain failure",
-                                "impact_scope": "only affects remote matrix replay path",
-                                "ok": False,
-                                "callable": False,
-                                "contract": True,
-                                "sample_compatibility": False,
-                                "args": args,
-                                "error_code": "sample_compatibility",
-                                "evidence": f"sample_compatibility={state.sample_compatibility}, remote_id={state.remote_id}",
-                                "repro_command": f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
-                            },
+                            _make_scope_skip_item(
+                                tool=name,
+                                transport="mcp",
+                                matrix=matrix,
+                                reason="sample compatibility issue for remote sample; skip replay-bound tool",
+                                issue_type="sample_compatibility",
+                                fix_hint="Keep remote matrix replay path as sample-specific; do not mark as remote toolchain failure",
+                                impact_scope="only affects remote matrix replay path",
+                                args=args,
+                                error_code="sample_compatibility",
+                                evidence=f"sample_compatibility={state.sample_compatibility}, remote_id={state.remote_id}",
+                                repro_command=f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
+                                contract=True,
+                                sample_compatibility=False,
+                            ),
+                        )
+                        continue
+
+                    covered_pass = _covered_preflight_pass(name, param_names, state)
+                    if covered_pass is not None:
+                        covered_by_tool, reason, error_code, issue_type, fix_hint, impact_scope = covered_pass
+                        args = _build_args(name, param_names, state, files)
+                        items.append(
+                            _make_covered_pass_item(
+                                tool=name,
+                                transport="mcp",
+                                matrix=matrix,
+                                covered_by_tool=covered_by_tool,
+                                reason=reason,
+                                issue_type=issue_type,
+                                fix_hint=fix_hint,
+                                impact_scope=impact_scope,
+                                args=args,
+                                error_code=error_code,
+                                evidence=reason,
+                                repro_command=f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
+                            ),
+                        )
+                        continue
+
+                    preflight_skip = _preflight_scope_skip(name, param_names, state)
+                    if preflight_skip is not None:
+                        reason, error_code, issue_type, fix_hint, impact_scope = preflight_skip
+                        args = _build_args(name, param_names, state, files)
+                        items.append(
+                            _make_scope_skip_item(
+                                tool=name,
+                                transport="mcp",
+                                matrix=matrix,
+                                reason=reason,
+                                issue_type=issue_type,
+                                fix_hint=fix_hint,
+                                impact_scope=impact_scope,
+                                args=args,
+                                error_code=error_code,
+                                evidence=reason,
+                                repro_command=f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
+                                contract=True,
+                            ),
                         )
                         continue
 
@@ -1161,6 +1803,7 @@ async def _run_transport_mcp(
                             "repro_command": f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
                         },
                     )
+                    _update_debug_progress(state, payload)
 
                     if name == "rd.capture.close_replay":
                         state.session_id = None
@@ -1291,26 +1934,23 @@ async def _run_transport_daemon(
             if skip_remote and matrix == "remote":
                 args = _build_args(name, param_names, states["local"], files)
                 items.append(
-                    {
-                        "tool": name,
-                        "transport": "daemon",
-                        "matrix": matrix,
-                        "status": "issue",
-                        "reason": "local-only mode: remote matrix skipped",
-                        "issue_type": "scope_skip",
-                        "fix_hint": "Run remote workflow in dedicated remote-only smoke pass.",
-                        "impact_scope": "local mode",
-                        "ok": False,
-                        "callable": False,
-                        "contract": False,
-                        "args": args,
-                        "error_code": "remote_skipped_local_mode",
-                        "evidence": "tool requires remote scope and has been skipped for local-only run",
-                        "repro_command": (
+                    _make_scope_skip_item(
+                        tool=name,
+                        transport="daemon",
+                        matrix=matrix,
+                        reason="local-only mode: remote matrix skipped",
+                        issue_type="scope_skip",
+                        fix_hint="Run remote workflow in dedicated remote-only smoke pass.",
+                        impact_scope="local mode",
+                        args=args,
+                        error_code="remote_skipped_local_mode",
+                        evidence="tool requires remote scope and has been skipped for local-only run",
+                        repro_command=(
                             f"python cli/run_cli.py --daemon-context {context_name} call {name} "
                             f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"
                         ),
-                    },
+                        contract=False,
+                    ),
                 )
                 continue
             if matrix == "remote":
@@ -1327,27 +1967,74 @@ async def _run_transport_daemon(
             if matrix == "remote" and requires_capture and state.sample_compatibility is False:
                 args = _build_args(name, param_names, state, files)
                 items.append(
-                    {
-                        "tool": name,
-                        "transport": "daemon",
-                        "matrix": matrix,
-                        "status": "issue",
-                        "reason": "sample compatibility issue for remote sample; skip replay-bound tool",
-                        "issue_type": "sample_compatibility",
-                        "fix_hint": "Keep remote matrix replay path as sample-specific; do not mark as remote toolchain failure",
-                        "impact_scope": "only affects remote matrix replay path",
-                        "ok": False,
-                        "callable": False,
-                        "contract": True,
-                        "sample_compatibility": False,
-                        "args": args,
-                        "error_code": "sample_compatibility",
-                        "evidence": f"sample_compatibility={state.sample_compatibility}, remote_id={state.remote_id}",
-                        "repro_command": (
+                    _make_scope_skip_item(
+                        tool=name,
+                        transport="daemon",
+                        matrix=matrix,
+                        reason="sample compatibility issue for remote sample; skip replay-bound tool",
+                        issue_type="sample_compatibility",
+                        fix_hint="Keep remote matrix replay path as sample-specific; do not mark as remote toolchain failure",
+                        impact_scope="only affects remote matrix replay path",
+                        args=args,
+                        error_code="sample_compatibility",
+                        evidence=f"sample_compatibility={state.sample_compatibility}, remote_id={state.remote_id}",
+                        repro_command=(
                             f"python cli/run_cli.py --daemon-context {context_name} call {name} "
                             f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"
                         ),
-                    },
+                        contract=True,
+                        sample_compatibility=False,
+                    ),
+                )
+                continue
+
+            covered_pass = _covered_preflight_pass(name, param_names, state)
+            if covered_pass is not None:
+                covered_by_tool, reason, error_code, issue_type, fix_hint, impact_scope = covered_pass
+                args = _build_args(name, param_names, state, files)
+                items.append(
+                    _make_covered_pass_item(
+                        tool=name,
+                        transport="daemon",
+                        matrix=matrix,
+                        covered_by_tool=covered_by_tool,
+                        reason=reason,
+                        issue_type=issue_type,
+                        fix_hint=fix_hint,
+                        impact_scope=impact_scope,
+                        args=args,
+                        error_code=error_code,
+                        evidence=reason,
+                        repro_command=(
+                            f"python cli/run_cli.py --daemon-context {context_name} call {name} "
+                            f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"
+                        ),
+                    ),
+                )
+                continue
+
+            preflight_skip = _preflight_scope_skip(name, param_names, state)
+            if preflight_skip is not None:
+                reason, error_code, issue_type, fix_hint, impact_scope = preflight_skip
+                args = _build_args(name, param_names, state, files)
+                items.append(
+                    _make_scope_skip_item(
+                        tool=name,
+                        transport="daemon",
+                        matrix=matrix,
+                        reason=reason,
+                        issue_type=issue_type,
+                        fix_hint=fix_hint,
+                        impact_scope=impact_scope,
+                        args=args,
+                        error_code=error_code,
+                        evidence=reason,
+                        repro_command=(
+                            f"python cli/run_cli.py --daemon-context {context_name} call {name} "
+                            f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"
+                        ),
+                        contract=True,
+                    ),
                 )
                 continue
 
@@ -1388,6 +2075,7 @@ async def _run_transport_daemon(
                     ),
                 },
             )
+            _update_debug_progress(state, payload)
 
             if name == "rd.capture.close_replay":
                 state.session_id = None
@@ -1462,7 +2150,7 @@ def _load_catalog() -> tuple[list[str], dict[str, list[str]]]:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dual-sample tool contract checker (196 tools)")
     parser.add_argument("--local-rdc", default=str(_default_desktop_rdc("03.rdc")))
-    parser.add_argument("--remote-rdc", default=str(_default_desktop_rdc("WhiteHair.rdc")))
+    parser.add_argument("--remote-rdc", default=str(_default_desktop_rdc("03.rdc")))
     parser.add_argument("--transport", choices=["mcp", "daemon", "both"], default="both")
     parser.add_argument("--daemon-context-prefix", default="rdx-smoke")
     parser.add_argument("--skip-remote", action="store_true", help="Skip remote-only tools and remote matrix validation in local smoke mode.")
@@ -1531,11 +2219,11 @@ def main() -> int:
             ),
         )
 
-    out_json = (root / args.out_json).resolve()
+    out_json = _resolve_cli_path(root, args.out_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    out_md = (root / args.out_md).resolve()
+    out_md = _resolve_cli_path(root, args.out_md)
     _write_markdown_report(result, out_md)
 
     print(f"[contract] wrote json: {out_json}")
@@ -1556,18 +2244,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

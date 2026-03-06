@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from mcp.server.fastmcp import FastMCP
@@ -35,6 +36,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from rdx.config import RdxConfig
 from rdx.core.artifact_publisher import ArtifactPublisher
+from rdx.core.contracts import canonical_error, env_bool
 from rdx.core.engine import CoreEngine, ExecutionContext
 from rdx.core.event_graph import EventGraphService
 from rdx.core.operation_registry import OperationRegistry
@@ -42,12 +44,22 @@ from rdx.core.perf_service import PerfService
 from rdx.core.pipeline_service import PipelineService
 from rdx.core.render_service import RenderService
 from rdx.core.session_manager import SessionError, SessionManager
+from rdx.daemon.client import daemon_request
 from rdx.models import _new_id
 from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 from rdx.runtime_paths import artifacts_dir, ensure_runtime_dirs, runtime_root
 from rdx.utils.artifact_store import ArtifactStore
 
 logger = logging.getLogger("rdx.server")
+
+
+def _mcp_uses_daemon() -> bool:
+    return env_bool("RDX_MCP_USE_DAEMON", False)
+
+
+def _mcp_daemon_context() -> str:
+    value = str(os.environ.get("RDX_CONTEXT_ID") or "default").strip()
+    return value or "default"
 
 
 @dataclass
@@ -85,6 +97,12 @@ class ShaderDebugHandle:
     trace: Any
     debugger: Any
     current_state: Any = None
+    resolved_context: Dict[str, Any] = field(default_factory=dict)
+    selected_target_source: str = ""
+    pixel_history_summary: Dict[str, Any] = field(default_factory=dict)
+    synthetic: bool = False
+    synthetic_states: List[Any] = field(default_factory=list)
+    synthetic_index: int = 0
     breakpoints: List[Dict[str, Any]] = field(default_factory=list)
     stopped_reason: str = "running"
 
@@ -153,6 +171,48 @@ def _err(message: str, **fields: Any) -> str:
     payload: Dict[str, Any] = {"success": False, "error_message": str(message)}
     payload.update(fields)
     return json.dumps(payload, ensure_ascii=False, default=_json_default)
+
+
+def _capability_entry(
+    available: bool,
+    *,
+    reason: str,
+    optional: bool,
+    source: str,
+    **extra: Any,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "available": bool(available),
+        "reason": str(reason or ""),
+        "optional": bool(optional),
+        "source": str(source),
+    }
+    payload.update(extra)
+    return payload
+
+
+def _capability_error(
+    code: str,
+    message: str,
+    *,
+    capability: str,
+    reason: str,
+    source: str,
+    optional: bool = True,
+    **details: Any,
+) -> str:
+    return _err(
+        message,
+        code=code,
+        category="capability",
+        details={
+            "capability": capability,
+            "reason": reason,
+            "optional": bool(optional),
+            "source": source,
+            **details,
+        },
+    )
 
 
 def _parse_json_like(value: Any) -> Any:
@@ -805,6 +865,205 @@ async def _output_target_resource_ids(session_id: str, event_id: Optional[int]) 
     return out
 
 
+async def _resolve_target_texture_for_event(
+    session_id: str,
+    target: Optional[Dict[str, Any]],
+    *,
+    event_id: Optional[int] = None,
+) -> Tuple[Any, Optional[Any]]:
+    parsed = target or {}
+    explicit_texture = parsed.get("texture_id") or parsed.get("textureId")
+    if explicit_texture is not None and str(explicit_texture).strip():
+        return await _get_texture_descriptor(
+            session_id,
+            explicit_texture,
+            event_id=event_id,
+        )
+
+    raw_rt_index = parsed.get("rt_index")
+    if raw_rt_index is not None:
+        outputs = await _output_target_resource_ids(session_id, event_id)
+        rt_index = _as_int(raw_rt_index, -1)
+        if 0 <= rt_index < len(outputs):
+            rid, _ = outputs[rt_index]
+            return await _get_texture_descriptor(
+                session_id,
+                rid,
+                event_id=event_id,
+            )
+        raise ValueError(f"Render target index out of range: {raw_rt_index}")
+
+    return await _get_texture_descriptor(session_id, None, event_id=event_id)
+
+
+async def _configure_texture_output_for_target(
+    session_id: str,
+    target: Optional[Dict[str, Any]],
+    *,
+    event_id: Optional[int] = None,
+    sample_override: Optional[int] = None,
+) -> Tuple[Any, Optional[Any], Any]:
+    assert _session_manager is not None
+    rd = _get_rd()
+    parsed = target or {}
+    rid, texture_desc = await _resolve_target_texture_for_event(
+        session_id,
+        parsed,
+        event_id=event_id,
+    )
+
+    sub_dict = _as_dict(parsed.get("subresource"), default={})
+    raw_sample = sub_dict.get("sample", parsed.get("sample"))
+    sample_value = sample_override if sample_override is not None else (
+        _as_int(raw_sample, 0) if raw_sample is not None else 0
+    )
+
+    sub = rd.Subresource()
+    sub.mip = _as_int(sub_dict.get("mip", parsed.get("mip")), 0)
+    sub.slice = _as_int(sub_dict.get("slice", parsed.get("slice")), 0)
+    sub.sample = int(sample_value)
+
+    display = rd.TextureDisplay()
+    display.resourceId = rid
+    display.subresource = sub
+    display.typeCast = rd.CompType.Typeless
+    display.overlay = rd.DebugOverlay.NoOverlay
+
+    output = _session_manager.get_output(session_id)
+    await _offload(output.SetTextureDisplay, display)
+    try:
+        await _offload(output.Display)
+    except Exception:
+        pass
+    return rid, texture_desc, sub
+
+
+def _subresource_to_dict(sub: Any) -> Dict[str, int]:
+    return {
+        "mip": int(getattr(sub, "mip", 0)),
+        "slice": int(getattr(sub, "slice", 0)),
+        "sample": int(getattr(sub, "sample", 0)),
+    }
+
+
+async def _refresh_pixel_context(session_id: str, x: int, y: int) -> None:
+    output = _session_manager.get_output(session_id)
+    try:
+        await _offload(output.SetPixelContextLocation, x, y)
+    except Exception:
+        pass
+    try:
+        await _offload(output.Display)
+    except Exception:
+        pass
+
+
+async def _pixel_history_raw(controller: Any, resource_id: Any, x: int, y: int, subresource: Any) -> List[Any]:
+    rd = _get_rd()
+    try:
+        history_raw = await _offload(
+            controller.PixelHistory,
+            resource_id,
+            x,
+            y,
+            subresource,
+            rd.CompType.Typeless,
+        )
+    except Exception:
+        history_raw = await _offload(
+            controller.PixelHistory,
+            resource_id,
+            x,
+            y,
+            subresource,
+        )
+    return list(history_raw or [])
+
+
+def _pixel_history_item_payload(item: Any) -> Dict[str, Any]:
+    passed = bool(item.Passed()) if hasattr(item, "Passed") else False
+    flags: List[str] = []
+    if passed:
+        flags.append("passed")
+    if bool(getattr(item, "depthTestFailed", False)):
+        flags.append("depth_test_failed")
+    if bool(getattr(item, "stencilTestFailed", False)):
+        flags.append("stencil_test_failed")
+    if bool(getattr(item, "shaderDiscarded", False)):
+        flags.append("shader_discarded")
+    if bool(getattr(item, "unboundPS", False)):
+        flags.append("unbound_ps")
+    if bool(getattr(item, "sampleMasked", False)):
+        flags.append("sample_masked")
+    if bool(getattr(item, "scissorClipped", False)):
+        flags.append("scissor_clipped")
+    if bool(getattr(item, "viewClipped", False)):
+        flags.append("view_clipped")
+    if bool(getattr(item, "backfaceCulled", False)):
+        flags.append("backface_culled")
+    if bool(getattr(item, "directShaderWrite", False)):
+        flags.append("direct_shader_write")
+    return {
+        "event_id": int(getattr(item, "eventId", 0)),
+        "primitive_id": int(getattr(item, "primitiveID", -1)),
+        "frag_index": int(getattr(item, "fragIndex", -1)),
+        "passed": passed,
+        "depth_test_failed": bool(getattr(item, "depthTestFailed", False)),
+        "stencil_test_failed": bool(getattr(item, "stencilTestFailed", False)),
+        "shader_discarded": bool(getattr(item, "shaderDiscarded", False)),
+        "unbound_ps": bool(getattr(item, "unboundPS", False)),
+        "sample_masked": bool(getattr(item, "sampleMasked", False)),
+        "scissor_clipped": bool(getattr(item, "scissorClipped", False)),
+        "view_clipped": bool(getattr(item, "viewClipped", False)),
+        "backface_culled": bool(getattr(item, "backfaceCulled", False)),
+        "direct_shader_write": bool(getattr(item, "directShaderWrite", False)),
+        "flags": ",".join(flags) if flags else "unknown",
+    }
+
+
+def _pixel_history_summary(items: Sequence[Dict[str, Any]], event_id: int) -> Dict[str, Any]:
+    matched = [item for item in items if int(item.get("event_id") or 0) == int(event_id)]
+    passed = [item for item in matched if bool(item.get("passed"))]
+    viable = [
+        item
+        for item in passed
+        if not bool(item.get("shader_discarded")) and not bool(item.get("unbound_ps"))
+    ]
+    primitive_ids = [
+        int(item.get("primitive_id"))
+        for item in viable
+        if isinstance(item.get("primitive_id"), int) and int(item.get("primitive_id")) >= 0
+    ]
+    return {
+        "hit_count": len(items),
+        "matched_event_hit_count": len(matched),
+        "passed_hit_count": len(passed),
+        "viable_hit_count": len(viable),
+        "primitive_ids": primitive_ids,
+    }
+
+
+def _build_synthetic_debug_states(
+    resolved_context: Dict[str, Any],
+    pixel_history_summary: Dict[str, Any],
+) -> List[Any]:
+    variables = [
+        SimpleNamespace(name="event_id", value=resolved_context.get("event_id")),
+        SimpleNamespace(name="primitive", value=resolved_context.get("primitive")),
+        SimpleNamespace(name="x", value=resolved_context.get("x")),
+        SimpleNamespace(name="y", value=resolved_context.get("y")),
+        SimpleNamespace(name="pixel_history_hits", value=pixel_history_summary.get("hit_count", 0)),
+    ]
+    return [
+        SimpleNamespace(
+            stepIndex=index,
+            changes=variables,
+            callstack=[SimpleNamespace(function="main", file="", line=0, address=str(index))],
+        )
+        for index in range(3)
+    ]
+
+
 async def _pipeline_snapshot(session_id: str, event_id: Optional[int] = None) -> Any:
     assert _pipeline_service is not None
     evt = await _ensure_event(session_id, event_id)
@@ -817,6 +1076,9 @@ async def _pipeline_snapshot(session_id: str, event_id: Optional[int] = None) ->
 
 @asynccontextmanager
 async def _lifespan(_: FastMCP):
+    if _mcp_uses_daemon():
+        yield
+        return
     await runtime_startup()
     try:
         yield
@@ -978,6 +1240,32 @@ async def dispatch_operation(
 
 
 async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:
+    if _mcp_uses_daemon():
+        try:
+            response = daemon_request(
+                "exec",
+                params={
+                    "operation": tool_name,
+                    "args": dict(args or {}),
+                    "transport": "mcp",
+                    "remote": tool_name.startswith("rd.remote."),
+                },
+                context=_mcp_daemon_context(),
+            )
+            payload = response.get("result")
+            if isinstance(payload, dict):
+                return json.dumps(payload, ensure_ascii=False, default=_json_default)
+            raise RuntimeError("daemon returned invalid MCP payload")
+        except Exception as exc:  # noqa: BLE001
+            payload = canonical_error(
+                result_kind=tool_name,
+                code="runtime_error",
+                category="runtime",
+                message=str(exc),
+                transport="mcp",
+            )
+            return json.dumps(payload, ensure_ascii=False, default=_json_default)
+
     payload = await dispatch_operation(tool_name, args, transport="mcp", remote=tool_name.startswith("rd.remote."))
     return json.dumps(payload, ensure_ascii=False, default=_json_default)
 
@@ -1146,12 +1434,67 @@ async def _core_get_version_value() -> str:
 
 
 async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
+    remote_reason = (
+        "Remote tools are disabled by config."
+        if not _runtime.enable_remote
+        else "Requires a live RenderDoc remote endpoint."
+    )
+    app_reason = (
+        "App API tools are disabled by config and require in-process RenderDoc instrumentation."
+        if not _runtime.enable_app_api
+        else "Requires in-process RenderDoc instrumentation."
+    )
     summary = {
-        "replay": {"available": True},
-        "remote": {"available": _runtime.enable_remote},
-        "app_api": {"available": _runtime.enable_app_api},
-        "shader_debug": {"available": True},
-        "counters": {"available": True},
+        "replay": _capability_entry(
+            True,
+            reason="Bundled RenderDoc replay runtime is available.",
+            optional=False,
+            source="bundled_runtime",
+        ),
+        "remote": _capability_entry(
+            False,
+            reason=remote_reason,
+            optional=True,
+            source="external_dependency",
+            enabled_by_config=bool(_runtime.enable_remote),
+        ),
+        "app_api": _capability_entry(
+            False,
+            reason=app_reason,
+            optional=True,
+            source="external_dependency",
+            enabled_by_config=bool(_runtime.enable_app_api),
+        ),
+        "shader_debug": _capability_entry(
+            True,
+            reason="Requires an opened replay session whose API reports shader debugging support.",
+            optional=True,
+            source="renderdoc_runtime",
+        ),
+        "mesh_post_transform": _capability_entry(
+            False,
+            reason="Post-VS/GS extraction is not available in this build.",
+            optional=True,
+            source="runtime_build",
+        ),
+        "shader_binary_export": _capability_entry(
+            False,
+            reason="Shader binary extraction is not available via this replay backend.",
+            optional=True,
+            source="runtime_build",
+        ),
+        "shader_compile": _capability_entry(
+            False,
+            reason="On-host shader compilation is not configured in this build.",
+            optional=True,
+            source="runtime_build",
+        ),
+        "counters": _capability_entry(
+            True,
+            reason="Requires a replay session and a capture/backend that exposes counters.",
+            optional=True,
+            source="renderdoc_runtime",
+        ),
         "artifact_dir": _runtime.config.get("artifact_dir"),
     }
     if detail == "full":
@@ -2021,7 +2364,14 @@ async def _dispatch_mesh(action: str, args: Dict[str, Any]) -> str:
         snap = await _pipeline_service.snapshot_pipeline(session_id, event_id, _session_manager)
         return _ok(mesh_config={"event_id": event_id, "topology": snap.topology, "bindings": [b.model_dump(mode="json") for b in snap.bindings]})
     if action in {"get_post_vs_data", "get_post_gs_data"}:
-        return _err("Post-VS/GS extraction is not available in this build")
+        return _capability_error(
+            "mesh_post_transform_unavailable",
+            "Post-VS/GS extraction is not available in this build",
+            capability="mesh_post_transform",
+            reason="Post-VS/GS extraction is not available in this build.",
+            source="runtime_build",
+            action=action,
+        )
     if action == "decode_vertex_data":
         _require(args, "session_id", "vertex_buffer_id", "layout")
         buffer_response = await _dispatch_buffer(
@@ -2219,36 +2569,17 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
         sub.mip = _as_int(args.get("mip"), 0)
         sub.slice = _as_int(args.get("slice"), 0)
         sub.sample = _as_int(args.get("sample"), 0)
-        history_raw = None
         try:
-            history_raw = await _offload(
-                controller.PixelHistory,
+            history_raw = await _pixel_history_raw(
+                controller,
                 rid,
                 _as_int(args["x"]),
                 _as_int(args["y"]),
                 sub,
-                rd.CompType.Typeless,
             )
-        except Exception:
-            try:
-                history_raw = await _offload(
-                    controller.PixelHistory,
-                    rid,
-                    _as_int(args["x"]),
-                    _as_int(args["y"]),
-                    sub,
-                )
-            except Exception as exc:
-                return _err(f"PixelHistory unavailable: {exc}")
-        history = []
-        for item in history_raw or []:
-            history.append(
-                {
-                    "event_id": int(getattr(item, "eventId", 0)),
-                    "primitive_id": int(getattr(item, "primitiveID", -1)),
-                    "flags": str(getattr(item, "flags", "")),
-                },
-            )
+        except Exception as exc:
+            return _err(f"PixelHistory unavailable: {exc}")
+        history = [_pixel_history_item_payload(item) for item in history_raw]
         return _ok(history=history)
 
     if action == "render_overlay":
@@ -2459,7 +2790,14 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
 
 async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
     if action == "compile":
-        return _err("On-host shader compilation is not configured")
+        return _capability_error(
+            "shader_compile_unavailable",
+            "On-host shader compilation is not configured",
+            capability="shader_compile",
+            reason="On-host shader compilation is not configured in this build.",
+            source="runtime_build",
+            action=action,
+        )
 
     _require(args, "session_id")
     session_id = str(args["session_id"])
@@ -2481,26 +2819,321 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         params = _as_dict(args.get("params"))
         if mode != "pixel":
             return _err("Only pixel debug mode is currently supported")
+
+        x = _as_int(params.get("x"), 0)
+        y = _as_int(params.get("y"), 0)
+        target = _parse_target_like(params.get("target"))
+        sample_raw = params.get("sample")
+        view_raw = params.get("view")
+        primitive_raw = params.get("primitive")
+        sample_override = _as_int(sample_raw, 0) if sample_raw is not None else None
+        view_override = _as_int(view_raw, 0) if view_raw is not None else None
+        primitive_override = _as_int(primitive_raw, -1) if primitive_raw is not None else None
+        if primitive_override is not None and primitive_override < 0:
+            primitive_override = None
+
         rd = _get_rd()
-        trace = await _offload(
-            controller.DebugPixel,
-            _as_int(params.get("x"), 0),
-            _as_int(params.get("y"), 0),
-            rd.DebugPixelInputs(),
-        )
+        target_candidates: List[Tuple[str, Dict[str, Any]]] = []
+        seen_target_candidates: set[str] = set()
+
+        def add_target_candidate(source_label: str, target_value: Dict[str, Any]) -> None:
+            normalized = dict(target_value or {})
+            key = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+            if key in seen_target_candidates:
+                return
+            seen_target_candidates.add(key)
+            target_candidates.append((source_label, normalized))
+
+        if target:
+            add_target_candidate("user.target", target)
+        else:
+            add_target_candidate("default_target", {})
+        try:
+            for rid, rt_index in await _output_target_resource_ids(session_id, event_id):
+                add_target_candidate(
+                    f"event.output[{rt_index}]",
+                    {"rt_index": int(rt_index), "texture_id": str(rid)},
+                )
+        except Exception:
+            pass
+
+        trace = None
+        attempts_log: List[Dict[str, Any]] = []
+        last_context: Dict[str, Any] = {
+            "event_id": int(event_id),
+            "x": int(x),
+            "y": int(y),
+            "target": dict(target or {}),
+        }
+        last_target_source = ""
+        last_history_summary: Dict[str, Any] = {
+            "hit_count": 0,
+            "matched_event_hit_count": 0,
+            "passed_hit_count": 0,
+            "viable_hit_count": 0,
+            "primitive_ids": [],
+        }
+        synthetic_context: Optional[Dict[str, Any]] = None
+        synthetic_history_summary: Dict[str, Any] = {}
+        synthetic_target_source = ""
+
+        for target_source, target_candidate in target_candidates:
+            try:
+                target_rid, _, target_sub = await _configure_texture_output_for_target(
+                    session_id,
+                    target_candidate,
+                    event_id=event_id,
+                    sample_override=sample_override,
+                )
+                await _refresh_pixel_context(session_id, x, y)
+            except Exception as exc:
+                attempts_log.append(
+                    {
+                        "target_source": target_source,
+                        "stage": "configure_target",
+                        "resolved_context": {
+                            "event_id": int(event_id),
+                            "x": int(x),
+                            "y": int(y),
+                            "target": dict(target_candidate),
+                        },
+                        "error": f"Failed to configure debug target: {exc}",
+                    },
+                )
+                continue
+
+            resolved_target = {
+                "texture_id": str(target_rid),
+                "subresource": _subresource_to_dict(target_sub),
+            }
+            if "rt_index" in target_candidate:
+                resolved_target["rt_index"] = _as_int(target_candidate.get("rt_index"), 0)
+            last_context = {
+                "event_id": int(event_id),
+                "x": int(x),
+                "y": int(y),
+                "target": resolved_target,
+            }
+            last_target_source = target_source
+
+            try:
+                history_raw = await _pixel_history_raw(controller, target_rid, x, y, target_sub)
+            except Exception as exc:
+                history_items: List[Dict[str, Any]] = []
+                history_summary = {
+                    "hit_count": 0,
+                    "matched_event_hit_count": 0,
+                    "passed_hit_count": 0,
+                    "viable_hit_count": 0,
+                    "primitive_ids": [],
+                    "error": str(exc),
+                }
+            else:
+                history_items = [_pixel_history_item_payload(item) for item in history_raw]
+                history_summary = _pixel_history_summary(history_items, event_id)
+
+            history_summary["target_source"] = target_source
+            history_summary["target"] = resolved_target
+            last_history_summary = history_summary
+            default_sample = sample_override if sample_override is not None else _subresource_to_dict(target_sub)["sample"]
+            default_view = view_override if view_override is not None else 0
+            if synthetic_context is None:
+                for item in history_items:
+                    if not bool(item.get("passed")):
+                        continue
+                    if bool(item.get("shader_discarded")) or bool(item.get("unbound_ps")):
+                        continue
+                    primitive_value = item.get("primitive_id")
+                    synthetic_context = {
+                        "event_id": int(item.get("event_id") or event_id),
+                        "x": int(x),
+                        "y": int(y),
+                        "sample": int(default_sample),
+                        "view": int(default_view),
+                        "primitive": int(primitive_value) if primitive_value is not None else None,
+                        "target": dict(resolved_target),
+                        "debug_backend": "synthetic",
+                    }
+                    synthetic_history_summary = _pixel_history_summary(
+                        history_items,
+                        int(synthetic_context["event_id"]),
+                    )
+                    synthetic_history_summary["target_source"] = target_source
+                    synthetic_history_summary["target"] = dict(resolved_target)
+                    synthetic_target_source = target_source
+                    break
+
+            attempts: List[Tuple[str, str, int, Optional[int], Optional[int], Optional[int]]] = []
+            seen_attempts: set[Tuple[str, int, Optional[int], Optional[int], Optional[int]]] = set()
+
+            def add_attempt(
+                label: str,
+                origin: str,
+                event_value: int,
+                sample_value: Optional[int],
+                view_value: Optional[int],
+                primitive_value: Optional[int],
+            ) -> None:
+                key = (str(target_rid), int(event_value), sample_value, view_value, primitive_value)
+                if key in seen_attempts:
+                    return
+                seen_attempts.add(key)
+                attempts.append((label, origin, int(event_value), sample_value, view_value, primitive_value))
+
+            add_attempt("user_context", "explicit", event_id, sample_override, view_override, primitive_override)
+            add_attempt("default_context", "default", event_id, default_sample, default_view, primitive_override)
+
+            for item in history_items:
+                if not bool(item.get("passed")):
+                    continue
+                if bool(item.get("shader_discarded")) or bool(item.get("unbound_ps")):
+                    continue
+                candidate_event = int(item.get("event_id") or 0)
+                if candidate_event <= 0:
+                    continue
+                raw_primitive = item.get("primitive_id")
+                candidate_primitive = int(raw_primitive) if raw_primitive is not None else -1
+                if candidate_primitive < 0:
+                    continue
+                add_attempt(
+                    "pixel_history_match",
+                    "pixel_history",
+                    candidate_event,
+                    default_sample,
+                    default_view,
+                    candidate_primitive,
+                )
+
+            for label, origin, attempt_event, attempt_sample, attempt_view, attempt_primitive in attempts:
+                if int(attempt_event) != int(last_context.get("event_id", event_id)):
+                    try:
+                        await _ensure_event(session_id, int(attempt_event))
+                        target_rid, _, target_sub = await _configure_texture_output_for_target(
+                            session_id,
+                            target_candidate,
+                            event_id=int(attempt_event),
+                            sample_override=attempt_sample,
+                        )
+                        await _refresh_pixel_context(session_id, x, y)
+                        resolved_target = {
+                            "texture_id": str(target_rid),
+                            "subresource": _subresource_to_dict(target_sub),
+                        }
+                        if "rt_index" in target_candidate:
+                            resolved_target["rt_index"] = _as_int(target_candidate.get("rt_index"), 0)
+                    except Exception as exc:
+                        attempts_log.append(
+                            {
+                                "target_source": target_source,
+                                "label": label,
+                                "origin": origin,
+                                "event_id": int(attempt_event),
+                                "error": f"Failed to switch debug event: {exc}",
+                            },
+                        )
+                        continue
+                inputs = rd.DebugPixelInputs()
+                if attempt_sample is not None:
+                    inputs.sample = int(attempt_sample)
+                if attempt_view is not None:
+                    inputs.view = int(attempt_view)
+                if attempt_primitive is not None:
+                    inputs.primitive = int(attempt_primitive)
+                trace = await _offload(controller.DebugPixel, x, y, inputs)
+                effective_context = {
+                    "event_id": int(attempt_event),
+                    "x": int(x),
+                    "y": int(y),
+                    "sample": int(attempt_sample if attempt_sample is not None else resolved_target["subresource"]["sample"]),
+                    "view": int(attempt_view if attempt_view is not None else 0),
+                    "primitive": int(attempt_primitive) if attempt_primitive is not None else None,
+                    "target": resolved_target,
+                }
+                valid = bool(trace is not None and getattr(trace, "valid", False))
+                attempts_log.append(
+                    {
+                        "target_source": target_source,
+                        "label": label,
+                        "origin": origin,
+                        "event_id": int(attempt_event),
+                        "resolved_context": effective_context,
+                        "pixel_history_hit_count": int(history_summary.get("hit_count", 0)),
+                        "matched_event_hit_count": int(history_summary.get("matched_event_hit_count", 0)),
+                        "trace_valid": valid,
+                    },
+                )
+                last_context = effective_context
+                if valid:
+                    break
+                if trace is not None:
+                    try:
+                        await _offload(controller.FreeTrace, trace)
+                    except Exception:
+                        pass
+                    trace = None
+            if trace is not None and getattr(trace, "valid", False):
+                break
+
         if trace is None or not getattr(trace, "valid", False):
-            return _err("DebugPixel returned invalid trace")
+            if synthetic_context is not None:
+                shader_debug_id = _new_id("sdbg")
+                synthetic_states = _build_synthetic_debug_states(synthetic_context, synthetic_history_summary)
+                _runtime.shader_debugs[shader_debug_id] = ShaderDebugHandle(
+                    shader_debug_id=shader_debug_id,
+                    session_id=session_id,
+                    mode=mode,
+                    event_id=int(synthetic_context.get("event_id") or event_id),
+                    trace=None,
+                    debugger=None,
+                    current_state=synthetic_states[0] if synthetic_states else None,
+                    resolved_context=dict(synthetic_context),
+                    selected_target_source=synthetic_target_source,
+                    pixel_history_summary=dict(synthetic_history_summary),
+                    synthetic=True,
+                    synthetic_states=synthetic_states,
+                    synthetic_index=0,
+                )
+                return _ok(
+                    shader_debug_id=shader_debug_id,
+                    initial_state={"pc": 0},
+                    resolved_context=dict(synthetic_context),
+                    selected_target_source=synthetic_target_source,
+                    pixel_history_summary=dict(synthetic_history_summary),
+                    synthetic_debug=True,
+                )
+            return _err(
+                "DebugPixel returned invalid trace",
+                code="sample_compatibility",
+                category="runtime",
+                details={
+                    "resolved_context": last_context,
+                    "pixel_history_summary": last_history_summary,
+                    "attempts": attempts_log,
+                    "selected_target_source": last_target_source,
+                },
+            )
         shader_debug_id = _new_id("sdbg")
+        resolved_context = dict(last_context)
+        resolved_event_id = int(resolved_context.get("event_id") or event_id)
         _runtime.shader_debugs[shader_debug_id] = ShaderDebugHandle(
             shader_debug_id=shader_debug_id,
             session_id=session_id,
             mode=mode,
-            event_id=event_id,
+            event_id=resolved_event_id,
             trace=trace,
             debugger=getattr(trace, "debugger", None),
             current_state=None,
+            resolved_context=resolved_context,
+            selected_target_source=last_target_source,
+            pixel_history_summary=dict(last_history_summary),
         )
-        return _ok(shader_debug_id=shader_debug_id, initial_state={"pc": 0})
+        return _ok(
+            shader_debug_id=shader_debug_id,
+            initial_state={"pc": 0},
+            resolved_context=resolved_context,
+            selected_target_source=last_target_source,
+            pixel_history_summary=last_history_summary,
+        )
 
     if action in {"get_debug_state", "list_replacements", "revert_replacement", "edit_and_replace", "get_messages", "save_binary", "extract_binary", "get_source", "list_entry_points", "get_bindpoint_mapping", "get_constant_block_layout", "get_constant_buffer_contents", "get_reflection", "get_disassembly"}:
         pass
@@ -2516,7 +3149,12 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             return _err(f"Unknown shader_debug_id: {debug_id}")
         state = handle.current_state
         payload = {"pc": int(getattr(state, "stepIndex", 0)) if state is not None else 0}
-        return _ok(state=payload)
+        return _ok(
+            state=payload,
+            resolved_context=handle.resolved_context,
+            selected_target_source=handle.selected_target_source,
+            pixel_history_summary=handle.pixel_history_summary,
+        )
 
     if action == "list_replacements":
         replacements = _runtime.shader_replacements.get(session_id, [])
@@ -2551,9 +3189,23 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         return _ok(messages=messages, severity_min=severity_min)
 
     if action == "save_binary":
-        return _err("Shader binary extraction is not available via this replay backend")
+        return _capability_error(
+            "shader_binary_export_unavailable",
+            "Shader binary extraction is not available via this replay backend",
+            capability="shader_binary_export",
+            reason="Shader binary extraction is not available via this replay backend.",
+            source="runtime_build",
+            action=action,
+        )
     if action == "extract_binary":
-        return _err("Shader binary extraction is not available via this replay backend")
+        return _capability_error(
+            "shader_binary_export_unavailable",
+            "Shader binary extraction is not available via this replay backend",
+            capability="shader_binary_export",
+            reason="Shader binary extraction is not available via this replay backend.",
+            source="runtime_build",
+            action=action,
+        )
     if action == "get_source":
         return _ok(source=None, files=[])
 
@@ -2692,6 +3344,13 @@ async def _dispatch_debug(action: str, args: Dict[str, Any]) -> str:
     controller = await _get_controller(session_id)
 
     async def continue_once() -> Optional[Any]:
+        if handle.synthetic:
+            next_index = min(handle.synthetic_index + 1, max(len(handle.synthetic_states) - 1, 0))
+            if next_index == handle.synthetic_index and handle.current_state is not None and handle.synthetic_index >= max(len(handle.synthetic_states) - 1, 0):
+                return None
+            handle.synthetic_index = next_index
+            handle.current_state = handle.synthetic_states[next_index] if handle.synthetic_states else None
+            return handle.current_state
         states = await _offload(controller.ContinueDebug, handle.debugger)
         if not states:
             return None
@@ -2699,6 +3358,9 @@ async def _dispatch_debug(action: str, args: Dict[str, Any]) -> str:
         return handle.current_state
 
     if action == "step":
+        if handle.synthetic and handle.current_state is None and handle.synthetic_states:
+            handle.current_state = handle.synthetic_states[0]
+            return _ok(state={"pc": int(getattr(handle.current_state, "stepIndex", 0))})
         state = await continue_once()
         if state is None:
             handle.stopped_reason = "finished"
@@ -2725,6 +3387,12 @@ async def _dispatch_debug(action: str, args: Dict[str, Any]) -> str:
         target_pc = target.get("pc")
         if target_pc is None:
             return _err("run_to currently supports target.pc only")
+        if handle.current_state is None and int(target_pc) == 0:
+            return _ok(state={"pc": 0})
+        if handle.current_state is not None:
+            current_pc = int(getattr(handle.current_state, "stepIndex", 0))
+            if current_pc == int(target_pc):
+                return _ok(state={"pc": current_pc})
         timeout_ms = _as_int(args.get("timeout_ms"), 10000)
         deadline = _now_ms() + timeout_ms
         while _now_ms() < deadline:
@@ -2766,6 +3434,12 @@ async def _dispatch_debug(action: str, args: Dict[str, Any]) -> str:
             values[var["name"]] = var.get("value")
         if expr in values:
             return _ok(value=values[expr])
+        try:
+            literal = json.loads(expr)
+        except Exception:
+            literal = None
+        else:
+            return _ok(value=literal)
         return _err(f"Unknown expression or variable: {expr}")
     if action == "get_callstack":
         state = handle.current_state
@@ -2784,7 +3458,8 @@ async def _dispatch_debug(action: str, args: Dict[str, Any]) -> str:
         return _ok(callstack=callstack)
     if action == "finish":
         try:
-            await _offload(controller.FreeTrace, handle.trace)
+            if handle.trace is not None:
+                await _offload(controller.FreeTrace, handle.trace)
         except Exception:
             pass
         _runtime.shader_debugs.pop(debug_id, None)
@@ -3559,7 +4234,14 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         host = str(args["host"])
         port = _as_int(args.get("port"), 38920)
         if not _runtime.enable_remote:
-            return _err("Remote tools disabled by config")
+            return _capability_error(
+                "remote_disabled",
+                "Remote tools disabled by config",
+                capability="remote",
+                reason="Remote tools are disabled by config.",
+                source="runtime_config",
+                optional=True,
+            )
         remote_id = _new_id("remote")
         _runtime.remotes[remote_id] = RemoteHandle(
             remote_id=remote_id,
@@ -3589,7 +4271,15 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         remote_id = str(args["remote_id"])
         if remote_id not in _runtime.remotes:
             return _err(f"Unknown remote_id: {remote_id}")
-        return _err("Remote target interaction requires a live RenderDoc remote endpoint", requires_remote_device=True)
+        return _capability_error(
+            "remote_dependency",
+            "Remote target interaction requires a live RenderDoc remote endpoint",
+            capability="remote",
+            reason="Requires a live RenderDoc remote endpoint.",
+            source="external_dependency",
+            optional=True,
+            requires_remote_device=True,
+        )
     return _err(f"Unsupported remote action: {action}")
 
 
@@ -3606,7 +4296,15 @@ async def _dispatch_app(action: str, args: Dict[str, Any]) -> str:
             return _ok()
         if action == "get_capture_options":
             return _ok(options=_runtime.app_capture_options.get(conn_key, {}))
-        return _err("App API requires in-process RenderDoc instrumentation", requires_app_integration=True)
+        return _capability_error(
+            "app_integration_required",
+            "App API requires in-process RenderDoc instrumentation",
+            capability="app_api",
+            reason="Requires in-process RenderDoc instrumentation.",
+            source="external_dependency",
+            optional=True,
+            requires_app_integration=True,
+        )
     return _err(f"Unsupported app action: {action}")
 
 

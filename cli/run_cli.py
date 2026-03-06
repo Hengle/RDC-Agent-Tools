@@ -89,6 +89,7 @@ def _print_launcher_help() -> None:
     print("usage: python cli/run_cli.py <command> [--daemon-context <id>] ...")
     print("commands:")
     print("  daemon start|stop|status")
+    print("  context clear")
     print("  call <operation> [--args-json ...] [--json] [--remote] [--connect]")
     print("  capture open|status")
     print("  diff pipeline|image")
@@ -96,6 +97,7 @@ def _print_launcher_help() -> None:
     print("")
     print("examples:")
     print("  python cli/run_cli.py daemon start --daemon-context local")
+    print("  python cli/run_cli.py context clear --daemon-context local")
     print("  python cli/run_cli.py capture open --file D:\\path\\capture.rdc --frame-index 0 --connect")
 
 

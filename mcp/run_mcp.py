@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import atexit
 import argparse
 import importlib.util
 import json
 import os
 import sys
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Iterable, Any
 
@@ -58,6 +62,7 @@ RETURN_ENV_ERROR = 2
 RETURN_STARTUP_ERROR = 3
 RETURN_TIMEOUT = 4
 RETURN_TOOL_ERROR = 5
+HEARTBEAT_INTERVAL_S = 60.0
 
 
 def _normalize_context(value: str | None) -> str:
@@ -140,6 +145,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     transport = _normalize_transport(parsed.transport)
     context_id = _normalize_context(parsed.context_id or parsed.daemon_context)
 
+    from rdx.daemon.client import (
+        attach_client,
+        cleanup_stale_daemon_states,
+        detach_client,
+        ensure_daemon,
+        heartbeat_client,
+    )
     from rdx.runtime_paths import ensure_runtime_dirs, ensure_tools_root_env
     from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 
@@ -218,6 +230,43 @@ def main(argv: Iterable[str] | None = None) -> int:
         _emit_runtime_env_error("runtime_layout_missing", "; ".join(layout_errors), context_id=context_id)
         return RETURN_ENV_ERROR
 
+    cleanup_stale_daemon_states(context=context_id)
+    ok_daemon, daemon_message, _ = ensure_daemon(context=context_id)
+    if not ok_daemon:
+        _emit_runtime_env_error("startup_failed", daemon_message, context_id=context_id)
+        return RETURN_STARTUP_ERROR
+
+    client_id = f"mcp-{uuid.uuid4().hex[:10]}"
+    ok_attach, attach_message, _ = attach_client(
+        context=context_id,
+        client_id=client_id,
+        client_type="mcp",
+        pid=os.getpid(),
+    )
+    if not ok_attach:
+        _emit_runtime_env_error("startup_failed", attach_message, context_id=context_id)
+        return RETURN_STARTUP_ERROR
+
+    stop_event = threading.Event()
+
+    def _detach_client() -> None:
+        stop_event.set()
+        try:
+            detach_client(context=context_id, client_id=client_id)
+        except Exception:
+            pass
+
+    def _heartbeat_loop() -> None:
+        while not stop_event.wait(HEARTBEAT_INTERVAL_S):
+            try:
+                heartbeat_client(context=context_id, client_id=client_id, pid=os.getpid())
+            except Exception:
+                break
+
+    atexit.register(_detach_client)
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, name="rdx-mcp-heartbeat", daemon=True)
+    heartbeat_thread.start()
+
     try:
         from rdx import server
     except Exception as exc:  # noqa: BLE001
@@ -226,6 +275,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         return RETURN_STARTUP_ERROR
 
     try:
+        os.environ["RDX_MCP_USE_DAEMON"] = "1"
         if transport == "sse":
             server.main_sse()
         elif transport == "streamable-http":
@@ -236,6 +286,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
         _emit_runtime_env_error("startup_failed", f"{exc}", context_id=context_id)
         return RETURN_STARTUP_ERROR
+    finally:
+        _detach_client()
     return RETURN_OK
 
 

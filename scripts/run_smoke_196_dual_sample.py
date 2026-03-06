@@ -330,15 +330,17 @@ def _stop_daemon_contexts(root: Path, bat: Path, contexts: list[str]) -> list[tu
             [
                 sys.executable,
                 str(root / "cli" / "run_cli.py"),
-                "daemon",
-                "stop",
                 "--daemon-context",
                 ctx,
+                "daemon",
+                "stop",
             ],
             cwd=root,
             timeout_s=30,
         )
-        out.append((ctx, code == 0, out_text + "\n" + err_text))
+        detail = out_text + "\n" + err_text
+        ok = code == 0 or "no active daemon" in detail.lower()
+        out.append((ctx, ok, detail))
     return out
 
 
@@ -414,7 +416,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run dual-sample smoke and rdx.bat usability report")
     parser.add_argument("--local-rdc", default=str(_default_desktop_rdc("03.rdc")))
     parser.add_argument("--remote-rdc", default=str(_default_desktop_rdc("WhiteHair.rdc")))
-    parser.add_argument("--out-desktop", default=str(Path.home() / "Desktop" / "rdx_smoke_issues_blockers.md"))
+    parser.add_argument("--out-desktop", default="intermediate/logs/rdx_smoke_issues_blockers.md")
     parser.add_argument("--command-json", default="intermediate/logs/rdx_bat_command_smoke.json")
     parser.add_argument("--command-md", default="intermediate/logs/rdx_bat_command_smoke.md")
     parser.add_argument("--usability-json", default="intermediate/logs/rdx_bat_usability_report.json")

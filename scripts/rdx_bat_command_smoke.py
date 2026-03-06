@@ -1,10 +1,11 @@
-﻿#!/usr/bin/env python3
-"""Smoke checks for rdx.bat entry chain in local mode."""
+#!/usr/bin/env python3
+"""Interactive and command smoke checks for rdx.bat."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -24,38 +25,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _default_desktop_rdc(name: str) -> Path:
-    return Path.home() / "Desktop" / name
+def _write_text_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
-def _run_command(
-    command: list[str],
-    *,
-    cwd: Path,
-    timeout_s: float,
-    stdin_text: str | None = None,
-    env: dict[str, str] | None = None,
-) -> ReturnCode:
-    try:
-        proc = subprocess.run(
-            command,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=max(1, int(timeout_s)),
-            input=stdin_text,
-            env=env,
-            shell=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return -1, "", str(exc), True
-    return proc.returncode, proc.stdout or "", proc.stderr or "", False
-
-
-def _trim_text(text: str, limit: int = 4000) -> str:
-    value = (text or "").replace("\r", " ").replace("\n", " ").strip()
+def _trim_text(text: str, limit: int = 8000) -> str:
+    value = (text or "").replace("\r", "").strip()
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
@@ -73,342 +49,162 @@ def _extract_json_payload(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _kill_process_tree(pid: int) -> None:
+    if pid <= 0:
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _run_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_s: float,
+    stdin_text: str | None = None,
+    env: dict[str, str] | None = None,
+) -> ReturnCode:
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        shell=False,
+    )
+    try:
+        out, err = proc.communicate(stdin_text, timeout=max(1, int(timeout_s)))
+        return proc.returncode, out or "", err or "", False
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_tree(proc.pid)
+        try:
+            out, err = proc.communicate(timeout=10)
+        except Exception:
+            out = exc.stdout or ""
+            err = exc.stderr or ""
+        return -1, (out or "") + (exc.stdout or ""), (err or "") + (exc.stderr or ""), True
+
+
 def _append_result(
     results: list[dict[str, Any]],
     *,
-    tool: str,
     test_id: str,
-    matrix: str,
     command: str,
     status: str,
     reason: str,
-    error_code: str,
-    args: list[str],
-    repro_command: str,
     evidence: str,
-    issue_type: str,
-    impact_scope: str,
-    fix_hint: str = "",
     context_id: str = "default",
 ) -> None:
     results.append(
         {
-            "tool": tool,
+            "tool": "rdx.bat",
             "id": test_id,
-            "matrix": matrix,
-            "command": command,
             "status": status,
             "reason": reason,
-            "error_code": error_code,
-            "issue_type": issue_type,
-            "fix_hint": fix_hint,
-            "impact_scope": impact_scope,
-            "args": args,
-            "repro_command": repro_command,
-            "evidence": _trim_text(evidence, 8000),
+            "command": command,
+            "evidence": _trim_text(evidence),
             "context_id": context_id,
         }
     )
 
 
-def _add_payload_check(
+def _check_contains(text: str, markers: list[str]) -> tuple[bool, str]:
+    for marker in markers:
+        if marker not in text:
+            return False, marker
+    return True, ""
+
+
+def _cleanup_context(root: Path, context_id: str) -> tuple[bool, str]:
+    proc = subprocess.run(
+        [sys.executable, "cli/run_cli.py", "--daemon-context", context_id, "daemon", "stop"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=45,
+        check=False,
+    )
+    detail = (proc.stdout or "") + (proc.stderr or "")
+    ok = proc.returncode == 0 or "no active daemon" in detail.lower()
+    return ok, _trim_text(detail)
+
+
+def _status_command(root: Path, context_id: str) -> tuple[int, str]:
+    proc = subprocess.run(
+        [sys.executable, "cli/run_cli.py", "--daemon-context", context_id, "daemon", "status"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=45,
+        check=False,
+    )
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _check_timed_start(
     results: list[dict[str, Any]],
     *,
+    root: Path,
     test_id: str,
-    command: list[str],
-    output: str,
-    matrix: str,
-    timed_out: bool,
-    require_json: bool,
-    require_ok: bool = True,
-    expected_context: str | None = None,
-    allow_non_zero: bool = False,
-    issue_type: str = "",
-    impact_scope: str = "command-chain",
-    fix_hint: str = "",
-) -> tuple[str, int]:
-    command_text = " ".join(command)
-    output_trimmed = _trim_text(output)
-
-    if timed_out:
+    stdin_text: str,
+    context_id: str,
+    markers: list[str],
+) -> None:
+    env = os.environ.copy()
+    env["RDX_BAT_TEST_MODE"] = "1"
+    code, out, err, timed_out = _run_command(
+        ["cmd", "/c", "rdx.bat"],
+        cwd=root,
+        timeout_s=8.0,
+        stdin_text=stdin_text,
+        env=env,
+    )
+    combined = out + "\n" + err
+    ok, missing = _check_contains(combined, markers)
+    if timed_out and ok:
         _append_result(
             results,
-            tool="rdx.bat",
             test_id=test_id,
-            matrix=matrix,
-            command=command_text,
-            status="blocker",
-            reason="command timeout",
-            error_code="timeout",
-            args=[a for a in command[1:]],
-            repro_command=command_text,
-            evidence=output_trimmed,
-            issue_type="",
-            impact_scope=impact_scope,
-            fix_hint=fix_hint,
-        )
-        return "blocker", 4
-
-    if allow_non_zero:
-        status = "pass" if output else "issue"
-        _append_result(
-            results,
-            tool="rdx.bat",
-            test_id=test_id,
-            matrix=matrix,
-            command=command_text,
-            status=status,
-            reason="" if status == "pass" else "non-zero but allowed in usability check",
-            error_code="" if status == "pass" else "non_zero_output",
-            args=[a for a in command[1:]],
-            repro_command=command_text,
-            evidence=output_trimmed,
-            issue_type="usability" if status == "issue" else "",
-            impact_scope=impact_scope,
-            fix_hint=fix_hint,
-        )
-        return status, 0 if status == "pass" else 5
-
-    payload = _extract_json_payload(output)
-    if require_json and payload is None:
-        _append_result(
-            results,
-            tool="rdx.bat",
-            test_id=test_id,
-            matrix=matrix,
-            command=command_text,
-            status="blocker",
-            reason="missing structured json payload",
-            error_code="non_json",
-            args=[a for a in command[1:]],
-            repro_command=command_text,
-            evidence=output_trimmed,
-            issue_type="structural",
-            impact_scope=impact_scope,
-            fix_hint=fix_hint,
-        )
-        return "blocker", 5
-
-    if require_json:
-        ok = bool(payload.get("ok")) if isinstance(payload, dict) else False
-        err_code = str(payload.get("error_code") if isinstance(payload, dict) else "")
-        err_msg = str(payload.get("error_message") or "") if isinstance(payload, dict) else ""
-        context = str(payload.get("context_id") or "default") if isinstance(payload, dict) else "default"
-        if expected_context and context != expected_context:
-            _append_result(
-                results,
-                tool="rdx.bat",
-                test_id=test_id,
-                matrix=matrix,
-                command=command_text,
-                status="blocker",
-                reason=f"context_id mismatch: expected={expected_context}, actual={context}",
-                error_code="context_mismatch",
-                args=[a for a in command[1:]],
-                repro_command=command_text,
-                evidence=output_trimmed,
-                issue_type="structural",
-                impact_scope=impact_scope,
-                fix_hint="Ensure --daemon-context propagates to child commands",
-            )
-            return "blocker", 5
-
-        if require_ok and not ok:
-            _append_result(
-                results,
-                tool="rdx.bat",
-                test_id=test_id,
-                matrix=matrix,
-                command=command_text,
-                status="blocker",
-                reason=err_msg or "command failed",
-                error_code=err_code or "tool_error",
-                args=[a for a in command[1:]],
-                repro_command=command_text,
-                evidence=output_trimmed,
-                issue_type="",
-                impact_scope=impact_scope,
-                fix_hint=fix_hint,
-            )
-            return "blocker", 5
-
-        if require_ok and ok:
-            _append_result(
-                results,
-                tool="rdx.bat",
-                matrix=matrix,
-                test_id=test_id,
-                command=command_text,
-                status="pass",
-                reason="",
-                error_code="0",
-                args=[a for a in command[1:]],
-                repro_command=command_text,
-                evidence=output_trimmed,
-                issue_type="",
-                impact_scope=impact_scope,
-                fix_hint=fix_hint,
-                context_id=context,
-            )
-            return "pass", 0
-
-        _append_result(
-            results,
-            tool="rdx.bat",
-            test_id=test_id,
-            matrix=matrix,
-            command=command_text,
+            command="rdx.bat",
             status="pass",
             reason="",
-            error_code="0",
-            args=[a for a in command[1:]],
-            repro_command=command_text,
-            evidence=output_trimmed,
-            issue_type="",
-            impact_scope=impact_scope,
-            fix_hint=fix_hint,
+            evidence=combined,
+            context_id=context_id,
         )
-        return "pass", 0
-
-    # Non-json command checks only verify marker presence in output.
-    if not output_trimmed:
+    else:
+        reason = f"missing marker: {missing}" if not ok else f"unexpected exit code={code}"
         _append_result(
             results,
-            tool="rdx.bat",
             test_id=test_id,
-            matrix=matrix,
-            command=command_text,
-            status="issue",
-            reason="empty output",
-            error_code="empty_output",
-            args=[a for a in command[1:]],
-            repro_command=command_text,
-            evidence=output_trimmed,
-            issue_type="",
-            impact_scope=impact_scope,
-            fix_hint=fix_hint,
-        )
-        return "issue", 5
-
-    _append_result(
-        results,
-        tool="rdx.bat",
-        test_id=test_id,
-        matrix=matrix,
-        command=command_text,
-        status="pass",
-        reason="",
-        error_code="0",
-        args=[a for a in command[1:]],
-        repro_command=command_text,
-        evidence=output_trimmed,
-        issue_type="",
-        impact_scope=impact_scope,
-        fix_hint=fix_hint,
-    )
-    return "pass", 0
-
-
-def _build_usability(results: list[dict[str, Any]]) -> dict[str, Any]:
-    summary = {
-        "total": len(results),
-        "pass": 0,
-        "issue": 0,
-        "blocker": 0,
-    }
-    checks = []
-    for item in results:
-        status = str(item.get("status") or "issue")
-        summary[status] = summary.get(status, 0) + 1
-        checks.append(
-            {
-                "check": str(item.get("id") or "unknown"),
-                "status": status,
-                "reason": str(item.get("reason") or ""),
-                "repro_command": str(item.get("repro_command") or ""),
-                "evidence": str(item.get("evidence") or ""),
-            }
+            command="rdx.bat",
+            status="blocker",
+            reason=reason,
+            evidence=combined,
+            context_id=context_id,
         )
 
-    if summary["blocker"] > 0:
-        overall = "FAIL"
-    elif summary["issue"] > 0:
-        overall = "PARTIAL"
-    else:
-        overall = "PASS"
 
-    return {
-        "overall": overall,
-        "summary": summary,
-        "checks": checks,
-    }
-
-
-def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    summary = payload["summary"]
-    usability = payload["usability"]
-    lines = [
-        "# rdx.bat command smoke",
-        f"- generated_at_utc: {payload.get('generated_at_utc', '')}",
-        f"- local_rdc: `{payload.get('local_rdc', '')}`",
-        f"- remote_rdc: `{payload.get('remote_rdc', '')}`",
-        f"- total: {summary.get('total', 0)}",
-        f"- pass: {summary.get('pass', 0)}",
-        f"- issue: {summary.get('issue', 0)}",
-        f"- blocker: {summary.get('blocker', 0)}",
-        f"- usability: {usability.get('overall', 'UNKNOWN')}",
-        "",
-        "## Checks",
-    ]
-    for item in usability.get("checks", []):
-        lines.append(f"- {item.get('check')}: {item.get('status')}")
-        if item.get("reason"):
-            lines.append(f"  - reason: {item.get('reason')}")
-        if item.get("repro_command"):
-            lines.append(f"  - repro: `{item.get('repro_command')}`")
-
-    lines.extend(["", "## Raw payload sample", "```", _trim_text(json.dumps(payload, ensure_ascii=False, indent=2), 12000), "```", ""])
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _write_usability(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    usability = payload["usability"]
-    lines = [
-        "# rdx.bat usability",
-        f"- generated_at_utc: {payload.get('generated_at_utc', '')}",
-        f"- usability: {usability.get('overall', 'UNKNOWN')}",
-        f"- total: {usability.get('summary', {}).get('total', 0)}",
-        f"- pass: {usability.get('summary', {}).get('pass', 0)}",
-        f"- issue: {usability.get('summary', {}).get('issue', 0)}",
-        f"- blocker: {usability.get('summary', {}).get('blocker', 0)}",
-        "",
-        "## Checks",
-    ]
-    for item in usability.get("checks", []):
-        lines.append(f"- {item.get('check')}: {item.get('status')}")
-        if item.get("reason"):
-            lines.append(f"  - reason: {item.get('reason')}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Smoke checks for rdx.bat command chain")
-    parser.add_argument("--local-rdc", default=str(_default_desktop_rdc("IRP_Desktop.rdc")))
-    parser.add_argument("--remote-rdc", default=str(_default_desktop_rdc("IRP_Desktop.rdc")))
-    parser.add_argument("--out-json", default="intermediate/logs/rdx_bat_command_smoke.json")
-    parser.add_argument("--out-md", default="intermediate/logs/rdx_bat_command_smoke.md")
-    parser.add_argument("--out-usability-json", default="intermediate/logs/rdx_bat_usability_report.json")
-    parser.add_argument("--out-usability-md", default="intermediate/logs/rdx_bat_usability_report.md")
-    return parser.parse_args()
-
-
-def _build_result_payload(results: list[dict[str, Any]], local_rdc: Path, remote_rdc: Path) -> dict[str, Any]:
+def _build_result_payload(results: list[dict[str, Any]], cleanup: dict[str, Any]) -> dict[str, Any]:
     return {
         "generated_at_utc": _now_iso(),
-        "local_rdc": str(local_rdc),
-        "remote_rdc": str(remote_rdc),
         "results": results,
         "summary": {
             "total": len(results),
@@ -416,171 +212,196 @@ def _build_result_payload(results: list[dict[str, Any]], local_rdc: Path, remote
             "issue": sum(1 for item in results if item.get("status") == "issue"),
             "blocker": sum(1 for item in results if item.get("status") == "blocker"),
         },
+        "cleanup": cleanup,
     }
 
 
-def _cleanup_sections(results: list[dict[str, Any]], context_ids: list[str]) -> dict[str, Any]:
-    return {
-        "contexts": context_ids,
-        "context_count": len(context_ids),
-        "commands": {
-            "rdx.bat --help": any(item.get("id") == "rdx-help" for item in results),
-            "mcp-ensure-env": any(item.get("id") == "mcp-ensure-env" for item in results),
-            "cli-shell": any(item.get("id") == "cli-shell-help" for item in results),
-            "daemon-shell": any(item.get("id") == "daemon-shell-lifecycle" for item in results),
-        },
-    }
+def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
+    summary = payload["summary"]
+    lines = [
+        "# rdx.bat command smoke",
+        f"- generated_at_utc: {payload.get('generated_at_utc', '')}",
+        f"- total: {summary.get('total', 0)}",
+        f"- pass: {summary.get('pass', 0)}",
+        f"- issue: {summary.get('issue', 0)}",
+        f"- blocker: {summary.get('blocker', 0)}",
+        "",
+        "## Checks",
+    ]
+    for item in payload.get("results", []):
+        lines.append(f"- {item.get('id')}: {item.get('status')}")
+        if item.get("reason"):
+            lines.append(f"  - reason: {item.get('reason')}")
+        lines.append(f"  - command: `{item.get('command')}`")
+    lines.append("")
+    _write_text_file(path, "\n".join(lines) + "\n")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Smoke checks for rdx.bat launcher")
+    parser.add_argument("--out-json", default="intermediate/logs/rdx_bat_command_smoke.json")
+    parser.add_argument("--out-md", default="intermediate/logs/rdx_bat_command_smoke.md")
+    return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
     root = ensure_tools_root_env()
-
-    bat = root / "rdx.bat"
-    local_rdc = Path(args.local_rdc)
-    remote_rdc = Path(args.remote_rdc)
-
-    if not bat.is_file():
-        print(f"[cmd-smoke] missing rdx.bat: {bat}")
-        return 2
-    if not local_rdc.is_file():
-        print(f"[cmd-smoke] missing local rdc: {local_rdc}")
-        return 2
-    if not remote_rdc.is_file():
-        print(f"[cmd-smoke] missing remote rdc: {remote_rdc}")
-        return 2
-
     results: list[dict[str, Any]] = []
-    context_smoke = f"smoke-{int(datetime.now(timezone.utc).timestamp())}"
+    cleanup_daemons: dict[str, bool] = {}
+    cleanup_notes: dict[str, str] = {}
 
-    _, _, _, has_blocker = False, None, None, False
+    env = os.environ.copy()
+    env["RDX_BAT_TEST_MODE"] = "1"
 
+    # interactive: help then exit
     code, out, err, timed_out = _run_command(
-        ["cmd", "/c", str(bat), "--help"],
+        ["cmd", "/c", "rdx.bat"],
         cwd=root,
         timeout_s=20.0,
+        stdin_text="3\n\n0\n",
+        env=env,
     )
-    status, code_out = _add_payload_check(
+    combined = out + "\n" + err
+    ok, missing = _check_contains(combined, ["=== rdx.bat Launcher ===", "=== rdx-tools Launcher Help ==="])
+    _append_result(
         results,
-        test_id="rdx-help",
-        command=["rdx.bat", "--help"],
-        output=(out + "\n" + err),
-        matrix="general",
-        timed_out=timed_out,
-        require_json=False,
-        issue_type="usability",
-        impact_scope="entry command",
-        fix_hint="Ensure --help shows non-interactive mcp and shell lifecycle entries",
+        test_id="interactive-help",
+        command="rdx.bat",
+        status="pass" if (not timed_out and code == 0 and ok) else "blocker",
+        reason="" if (not timed_out and code == 0 and ok) else (f"missing marker: {missing}" if not ok else f"code={code}, timed_out={timed_out}"),
+        evidence=combined,
     )
-    if status == "blocker":
-        has_blocker = True
 
-    mcp_ctx = f"{context_smoke}-mcp"
+    # interactive: start CLI default
     code, out, err, timed_out = _run_command(
-        ["cmd", "/c", str(bat), "--non-interactive", "mcp", "--daemon-context", mcp_ctx, "--ensure-env"],
+        ["cmd", "/c", "rdx.bat"],
         cwd=root,
-        timeout_s=60.0,
+        timeout_s=45.0,
+        stdin_text="1\n1\nstatus\nexit\n0\n",
+        env=env,
     )
-    status, code_out = _add_payload_check(
+    combined = out + "\n" + err
+    status_code, status_text = _status_command(root, "default")
+    ok, missing = _check_contains(combined, ["CLI shell ready. context=default", "result_kind\": \"rdx.daemon.status\""])
+    _append_result(
         results,
-        test_id="mcp-ensure-env",
-        command=["rdx.bat", "--non-interactive", "mcp", "--daemon-context", mcp_ctx, "--ensure-env"],
-        output=(out + "\n" + err),
-        matrix="local",
-        timed_out=timed_out,
-        require_json=True,
-        expected_context=mcp_ctx,
-        impact_scope="mcp lifecycle",
-        fix_hint="Run with fixed renderdoc runtime: check binaries/windows/x64/renderdoc.dll and pymodules/renderdoc.pyd",
+        test_id="interactive-cli-default",
+        command="rdx.bat",
+        status="pass" if (code == 0 and not timed_out and ok and status_code == 0) else "blocker",
+        reason="" if (code == 0 and not timed_out and ok and status_code == 0) else (f"missing marker: {missing}" if not ok else f"status_code={status_code}"),
+        evidence=combined + "\n" + status_text,
+        context_id="default",
     )
-    if status == "blocker":
-        has_blocker = True
 
+    # interactive: start CLI custom
+    custom_ctx = "smoke-cli-custom"
     code, out, err, timed_out = _run_command(
-        ["cmd", "/c", str(bat), "--non-interactive", "cli-shell", "--daemon-context", f"{context_smoke}-cli", "--help"],
+        ["cmd", "/c", "rdx.bat"],
         cwd=root,
-        timeout_s=30.0,
+        timeout_s=45.0,
+        stdin_text=f"1\n2\n{custom_ctx}\nstatus\nclear\nstop\nexit\n0\n",
+        env=env,
     )
-    status, code_out = _add_payload_check(
+    combined = out + "\n" + err
+    status_code, status_text = _status_command(root, custom_ctx)
+    ok, missing = _check_contains(combined, ["CLI shell ready. context=smoke-cli-custom", "result_kind\": \"rdx.context.clear\"", "daemon stopped"])
+    _append_result(
         results,
-        test_id="cli-shell-help",
-        command=["rdx.bat", "--non-interactive", "cli-shell", "--help"],
-        output=(out + "\n" + err),
-        matrix="general",
-        timed_out=timed_out,
-        require_json=False,
-        issue_type="usability",
-        impact_scope="cli shell",
-        fix_hint="Use non-interactive mode for smoke; avoid blocking interactive shell input.",
+        test_id="interactive-cli-custom",
+        command="rdx.bat",
+        status="pass" if (code == 0 and not timed_out and ok and status_code != 0) else "blocker",
+        reason="" if (code == 0 and not timed_out and ok and status_code != 0) else (f"missing marker: {missing}" if not ok else f"status_code={status_code}"),
+        evidence=combined + "\n" + status_text,
+        context_id=custom_ctx,
     )
-    if status == "blocker":
-        has_blocker = True
 
-    daemon_ctx = f"{context_smoke}-daemon"
-    code, out, err, timed_out = _run_command(
-        ["cmd", "/c", str(bat), "--non-interactive", "daemon-shell", "--daemon-context", daemon_ctx, "start", "status", "stop"],
-        cwd=root,
-        timeout_s=60.0,
-    )
-    status, code_out = _add_payload_check(
+    # interactive: start MCP stdio / http
+    _check_timed_start(
         results,
-        test_id="daemon-shell-lifecycle",
-        command=[
-            "rdx.bat",
-            "--non-interactive",
-            "daemon-shell",
-            "--daemon-context",
-            daemon_ctx,
-            "start",
-            "status",
-            "stop",
-        ],
-        output=(out + "\n" + err),
-        matrix="general",
-        timed_out=timed_out,
-        require_json=True,
-        expected_context=daemon_ctx,
-        impact_scope="daemon lifecycle",
-        fix_hint="daemon-shell should complete start/status/stop and emit JSON on timeout-safe path",
+        root=root,
+        test_id="interactive-mcp-stdio",
+        stdin_text="2\n2\nsmoke-mcp-stdio\n1\n",
+        context_id="smoke-mcp-stdio",
+        markers=["Start MCP. context=smoke-mcp-stdio", "URL: no URL"],
     )
-    if status == "blocker":
-        has_blocker = True
+    _check_timed_start(
+        results,
+        root=root,
+        test_id="interactive-mcp-http",
+        stdin_text="2\n2\nsmoke-mcp-http\n2\n127.0.0.1\n8765\n",
+        context_id="smoke-mcp-http",
+        markers=["Start MCP. context=smoke-mcp-http", "URL: http://127.0.0.1:8765"],
+    )
 
-    payload = _build_result_payload(results, local_rdc, remote_rdc)
-    payload["usability"] = _build_usability(results)
-    payload["cleanup"] = _cleanup_sections(results, [mcp_ctx, daemon_ctx])
+    # legacy aliases
+    for test_id, command, context_id in [
+        ("legacy-cli-shell", ["cmd", "/c", "rdx.bat", "cli-shell", "smoke-legacy-cli"], "smoke-legacy-cli"),
+        ("legacy-daemon-shell", ["cmd", "/c", "rdx.bat", "daemon-shell", "smoke-legacy-daemon"], "smoke-legacy-daemon"),
+    ]:
+        code, out, err, timed_out = _run_command(
+            command,
+            cwd=root,
+            timeout_s=45.0,
+            stdin_text="status\nexit\n",
+            env=env,
+        )
+        combined = out + "\n" + err
+        ok, missing = _check_contains(combined, ["compat", "CLI shell ready", "result_kind\": \"rdx.daemon.status\""])
+        _append_result(
+            results,
+            test_id=test_id,
+            command=" ".join(command[2:]),
+            status="pass" if (code == 0 and not timed_out and ok) else "blocker",
+            reason="" if (code == 0 and not timed_out and ok) else (f"missing marker: {missing}" if not ok else f"code={code}"),
+            evidence=combined,
+            context_id=context_id,
+        )
 
+    # non-interactive compatibility
+    for test_id, command, expect_json in [
+        ("help", ["cmd", "/c", "rdx.bat", "--help"], False),
+        ("mcp-ensure-env", ["cmd", "/c", "rdx.bat", "--non-interactive", "mcp", "--ensure-env"], True),
+        ("cli-shell-help", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli-shell", "--help"], True),
+        (
+            "daemon-shell-lifecycle",
+            ["cmd", "/c", "rdx.bat", "--non-interactive", "daemon-shell", "--daemon-context", "smoke-test", "start", "status", "stop"],
+            True,
+        ),
+    ]:
+        code, out, err, timed_out = _run_command(command, cwd=root, timeout_s=60.0)
+        combined = out + "\n" + err
+        payload = _extract_json_payload(combined)
+        if expect_json:
+            passed = (not timed_out) and code == 0 and isinstance(payload, dict) and bool(payload.get("ok"))
+        else:
+            passed = (not timed_out) and code == 0 and "rdx.bat usage:" in combined
+        _append_result(
+            results,
+            test_id=test_id,
+            command=" ".join(command[2:]),
+            status="pass" if passed else "blocker",
+            reason="" if passed else f"code={code}, timed_out={timed_out}",
+            evidence=combined,
+        )
+
+    # cleanup
+    for ctx in ["default", custom_ctx, "smoke-mcp-stdio", "smoke-mcp-http", "smoke-legacy-cli", "smoke-legacy-daemon", "smoke-test"]:
+        ok, detail = _cleanup_context(root, ctx)
+        cleanup_daemons[ctx] = ok
+        cleanup_notes[ctx] = detail
+
+    payload = _build_result_payload(results, {"daemons": cleanup_daemons, "details": cleanup_notes})
     out_json = (root / args.out_json).resolve()
+    out_md = (root / args.out_md).resolve()
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    out_md = (root / args.out_md).resolve()
     _write_markdown(out_md, payload)
-
-    usability = {
-        "generated_at_utc": payload["generated_at_utc"],
-        "local_rdc": payload["local_rdc"],
-        "remote_rdc": payload["remote_rdc"],
-        "usability": payload["usability"],
-    }
-    out_usability_json = (root / args.out_usability_json).resolve()
-    out_usability_json.parent.mkdir(parents=True, exist_ok=True)
-    out_usability_json.write_text(json.dumps(usability, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    out_usability_md = (root / args.out_usability_md).resolve()
-    _write_usability(out_usability_md, usability)
 
     print(f"[cmd-smoke] wrote json: {out_json}")
     print(f"[cmd-smoke] wrote md: {out_md}")
-    print(f"[cmd-smoke] wrote usability json: {out_usability_json}")
-    print(f"[cmd-smoke] wrote usability md: {out_usability_md}")
-
-    return 1 if has_blocker else 0
+    return 1 if any(item.get("status") == "blocker" for item in results) else 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-
-

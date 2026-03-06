@@ -122,12 +122,31 @@ class CoreEngine:
             details = {
                 k: v
                 for k, v in raw.items()
-                if k not in {"success", "error_message", "ok", "error", "schema_version", "tool_version", "result_kind", "data", "artifacts", "meta"}
+                if k
+                not in {
+                    "success",
+                    "error_message",
+                    "ok",
+                    "error",
+                    "schema_version",
+                    "tool_version",
+                    "result_kind",
+                    "data",
+                    "artifacts",
+                    "meta",
+                    "code",
+                    "error_code",
+                    "category",
+                    "details",
+                }
             }
+            explicit_details = raw.get("details")
+            if isinstance(explicit_details, dict):
+                details = {**explicit_details, **details}
             return canonical_error(
                 result_kind=str(operation),
-                code="runtime_error",
-                category="runtime",
+                code=str(raw.get("code") or raw.get("error_code") or "runtime_error"),
+                category=str(raw.get("category") or "runtime"),
                 message=error_message,
                 details=details,
                 trace_id=ctx.trace_id,
