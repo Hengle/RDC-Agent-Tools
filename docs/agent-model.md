@@ -1,0 +1,108 @@
+﻿# Agent 使用模型
+
+本文面向上层 Agent / framework，说明 `rdx-tools` 应如何被安全使用，以及为什么“只给一份 tools 清单”通常不够。
+
+本文只描述平台约束，不描述具体业务策略。
+
+## 1. 规范源优先级
+
+对上层 Agent 来说，判断平台定义时应遵循以下顺序：
+
+1. `spec/tool_catalog_196.json` 与共享响应契约
+2. runtime 实际行为
+3. `CLI` convenience wrapper
+
+因此：
+
+- tool 能力面与参数语义，以 catalog 和共享契约为准。
+- runtime 行为是平台真相的运行时体现。
+- `CLI` 不是完整能力面的等价镜像，也不是规范源。
+
+## 2. 为什么 tools 清单不够
+
+仅有 `spec/tool_catalog_196.json` 或 tool 名称列表，通常仍不足以让 Agent 稳定工作，原因包括：
+
+- 某些 tool 存在前置依赖，必须先建立 session。
+- 关键状态对象需要跨步骤传递，例如 `capture_file_id`、`session_id`、`event_id`。
+- `capture_file_id`、`session_id` 是运行时句柄，不是长期稳定标识。
+- 有些操作成本更高或输出更多，若没有平台约束，Agent 容易无序扩张调用。
+- 失败恢复依赖共享契约，调用端需要明确检查 `ok` 与 `error_message`。
+
+因此，Agent 需要的不只是 catalog，还需要平台使用模型。
+
+## 3. 仓库负责什么
+
+本仓库负责：
+
+- 提供 `CLI`、`MCP`、tool catalog 与 runtime 约束。
+- 提供从 `.rdc` 到 session 的最小链路。
+- 提供状态模型、错误面与失败恢复入口。
+
+本仓库不负责：
+
+- debug / analysis / reverse / optimize 的任务策略。
+- 上层用户意图到 tool 序列的业务编排。
+- 任务级 playbook 或专家 workflow。
+- 自动恢复策略的最终决策。
+
+## 4. Agent 的推荐使用原则
+
+上层 Agent / framework 应遵循这些平台级原则：
+
+- 先发现 tools，再执行任务。
+  - `MCP` client 应先完成 tool discovery，再决定调用顺序。
+- 先建立 session，再做 inspection。
+  - 对 `.rdc` 的平台最小链路是 `rd.core.init -> rd.capture.open_file -> rd.capture.open_replay -> rd.replay.set_frame`。
+- 显式保存关键状态。
+  - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
+- 把 handle 当作短生命周期引用。
+  - 上层如需缓存，必须准备重建 session 的恢复路径，而不是把 handle 当成永久主键。
+- 优先轻量调用。
+  - 先获取事件、状态、元数据，再进入导出、diff、debug 等更重的操作。
+- 失败时先看共享契约。
+  - 优先检查 `ok` 与 `error_message`，再决定重试、恢复或切换路径。
+
+## 5. 恢复 ownership
+
+仓库负责提供标准错误面与平台约束；上层 Agent / framework 负责决定：
+
+- 是否重试
+- 是否重建 session
+- 是否切换 context
+- 是否降级任务目标
+
+仓库不承诺自动恢复策略，也不提供任务级恢复 playbook。
+
+## 6. `CLI` 与 `MCP` 的角色区别
+
+`CLI` 更适合：
+
+- 人工调试
+- 回归验证
+- 快速确认 `.rdc` 能否打开
+- 最小链路 smoke
+
+`MCP` 更适合：
+
+- 上层 Agent / framework 接入
+- 工具发现
+- 多步编排
+- 按任务动态决定后续 tool 序列
+
+因此，对 Agent 来说，`MCP` 是主接口；`CLI` 更像是人工与自动化验证入口。
+
+## 7. 建议上层文档说明到什么程度
+
+上层框架文档建议描述：
+
+- 如何发现 tools
+- 如何建立与复用 session
+- 如何保存关键状态
+- 如何处理失败与恢复
+
+上层框架文档不必描述：
+
+- 每种业务目标的固定 tool 顺序
+- 每一种渲染问题的专家级分析步骤
+
+换句话说，上层文档应提供“护栏”和“原则”，而不是替 Agent 完成全部思考。

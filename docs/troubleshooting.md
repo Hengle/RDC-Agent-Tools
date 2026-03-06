@@ -1,73 +1,167 @@
 ﻿# Troubleshooting
 
-## 鍙屽嚮 `rdx.bat` 涔嬪悗绐楀彛鍍忔槸鈥滈棯閫€鈥?
-褰撳墠琛屼负搴斾负杩涘叆浜や簰鑿滃崟锛岃€屼笉鏄洿鎺ユ墦鍗?help 閫€鍑恒€?
-濡傛灉娌℃湁杩涘叆鑿滃崟锛岃鍏堟鏌ワ細
+## `rdx.bat` 双击后窗口像是“闪退”
 
-- `rdx.bat` 鏄惁鑳芥壘鍒?`scripts/rdx_bat_launcher.ps1`
-- 褰撳墠鐩綍鏄惁鏄?`rdx-tools` 鏍圭洰褰?- `RDX_TOOLS_ROOT` 鏄惁琚閮ㄧ幆澧冮敊璇鐩?
-## `Start CLI` 閫€鍑哄悗 daemon 杩樺湪
+当前预期行为是进入交互式菜单，而不是直接打印帮助后退出。
 
-杩欐槸棰勬湡琛屼负銆?
-`Start CLI` 鐨?shell 閫€鍑鸿涔夋槸锛?
+如果没有进入菜单，优先检查：
+
+- `rdx.bat` 是否能找到 `scripts/rdx_bat_launcher.ps1`
+- 当前目录是否是 `rdx-tools` 根目录
+- `RDX_TOOLS_ROOT` 是否被外部环境错误覆盖
+
+## `Start CLI` 退出后 daemon 还在
+
+这是预期行为。
+
 - `exit` / `quit`
-  - 鍙€€鍑哄綋鍓?shell
-  - 榛樿淇濈暀 daemon 鍜?context
+  - 只退出当前 shell
+  - 默认保留 daemon 与 context
 
-濡傛灉闇€瑕佹樉寮忓仠姝㈡垨娓呯悊锛岃浣跨敤锛?
+如果需要显式停止或清理，请使用：
+
 ```bat
 rdx daemon status
 rdx daemon stop
 rdx context clear
 ```
 
-## shell 寮傚父鍏抽棴鍚庝細涓嶄細鐣欎笅閲?daemon
+## 状态面与来源优先级是什么
 
-launcher / daemon 宸插疄鐜帮細
+排查问题时，请先区分三类状态面：
+
+- local session state
+  - 由 `capture open` 等命令写入本地状态文件，供后续命令读取。
+- daemon state
+  - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
+- runtime 内部对象
+  - 真正的 replay、debug、active event、controller 等进程内对象。
+
+因此：
+
+- `capture status` 读的是 local session state，不是直接探测 live runtime。
+- `daemon status` 读的是 daemon state，不等价于 local session state，也不保证字段完全同构。
+- 状态文件缺失，不一定等于 runtime 已完全不可用；反过来，daemon 还在，也不等于 local session state 一定存在。
+
+## `rdx daemon status` 返回 `no active daemon`
+
+常见原因：
+
+- 该 context 从未启动 daemon
+- daemon 已被显式 `stop`
+- daemon 因无 attached client 且超过 idle TTL 自动退出
+- state file 已被 stale cleanup 清理
+
+恢复方式：
+
+- 重新进入 `Start CLI` 或 `Start MCP`
+- 或显式执行 `rdx daemon start`
+- 再重新打开 capture 或恢复上层调用链路
+
+## 为什么 `capture status` 没有 session，但 `daemon status` 还显示 daemon 在
+
+这是可能发生的。
+
+原因通常不是“平台自相矛盾”，而是因为两条命令读取的是不同状态面：
+
+- `capture status` 读取 local session state
+- `daemon status` 读取 daemon state
+
+可能场景包括：
+
+- daemon 仍然存活，但 local session state 尚未写入或已被清理
+- daemon 仍然存活，但当前 context 下没有可复用的 capture/session 摘要
+- 你查询的是不同 context
+
+如果目标是继续使用当前 `.rdc` 链路，优先检查当前 context，并视情况重新执行 `capture open`。
+
+## 为什么有 local session state，但 daemon 没有附着或没有 active session 摘要
+
+这也是可能发生的。
+
+因为 local session state 与 daemon state 不是同一份数据：
+
+- 前者更像“本地命令读取入口”
+- 后者更像“daemon 生命周期与共享状态入口”
+
+如果你是非 daemon 直连路径建立的 session，local session state 可以存在，而 daemon 并没有对应附着关系。
+
+## 顺序执行有效，为什么并发观测可能读不到状态
+
+文档中的示例默认按顺序执行语义编写。
+
+如果你把 `capture open` 和 `capture status` 并发执行，`capture status` 可能在状态文件尚未写入完成前就读取，从而得到“没有 session state”的结果。
+
+这不应被上升为平台定义。除非文档明确声明支持并发，否则请按顺序链路理解文档示例。
+
+## 什么时候应该重开 `.rdc`，什么时候只需要重连 daemon / 复用 context
+
+优先按下面的思路判断：
+
+- daemon 不在了
+  - 先重连或重启 daemon。
+- daemon 在，但 local session state 缺失
+  - 先检查 context 是否一致；若只是本地状态缺失，通常重新 `capture open` 最直接。
+- local session state 在，但后续操作失败
+  - 说明问题可能在 runtime 内部对象层；上层可以选择重建 session，而不必立即怀疑 catalog 或契约。
+
+## `CLI` 中 `--daemon-context` 放哪里
+
+`--daemon-context` 是顶层参数，必须放在子命令前：
+
+```bat
+python cli/run_cli.py --daemon-context smoke daemon status
+```
+
+而不是：
+
+```bat
+python cli/run_cli.py daemon status --daemon-context smoke
+```
+
+后者会被 argparse 识别为非法参数位置。
+
+## PowerShell 与 `cmd` 下 `--args-json` 写法不同
+
+这是命令行解析差异，不是 `rdx-tools` 独有问题。
+
+在 `cmd` / `CLI shell` 中常见写法是：
+
+```bat
+rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --json --connect
+```
+
+如果你在 PowerShell 里直接调用 `python cli/run_cli.py ...`，需要根据 PowerShell 的转义规则重新组织 JSON 字符串。优先建议：
+
+- 先使用 `rdx.bat` 的 `Start CLI`
+- 或把复杂 JSON 放入脚本变量后再传参
+
+## `Start MCP` 里的 `stdio` 为什么没有 URL
+
+这是预期行为。
+
+`stdio` transport 不提供网络端点，因此 launcher 会显示“无 URL”或等价提示。
+
+如果你需要网络端点，请选择 `streamable-http`。
+
+## `streamable-http` 启动失败
+
+优先检查：
+
+- `host` / `port` 是否可用
+- 当前机器是否已有其他进程占用同一端口
+- daemon 是否已成功启动
+- `python mcp/run_mcp.py --help` 与 `python mcp/run_mcp.py --ensure-env` 是否可运行
+
+## shell 异常关闭后会不会留下 daemon
+
+`rdx-tools` 已实现：
 
 - `attached_clients`
 - lease / heartbeat
 - idle TTL
 - stale state cleanup
 
-鐭椂闂磋鍏?shell 鍚庯紝浠嶅彲鍦ㄧ浉鍚?context 涓婇噸鏂伴檮鐫€銆?
-闀挎椂闂存棤浜烘帴绠℃椂锛宒aemon 浼氬洜涓烘棤 attached client 涓旇秴杩?idle TTL 鑰岃嚜鍔ㄩ€€鍑恒€?
-## `Start MCP` 閲岀殑 `stdio` 涓轰粈涔堟病鏈?URL
+短时间误关 shell 后，通常仍可在相同 context 上重新附着。
 
-杩欐槸棰勬湡琛屼负銆?
-`stdio` transport 涓嶆彁渚涚綉缁滅鐐癸紝鍥犳 launcher 浼氭槑纭樉绀猴細
-
-```text
-URL: no URL
-```
-
-濡傛灉闇€瑕佺綉缁滅鐐癸紝璇烽€夋嫨 `streamable-http`銆?
-## `streamable-http` 鍚姩澶辫触
-
-浼樺厛妫€鏌ワ細
-
-- `host` / `port` 鏄惁鍙敤
-- 褰撳墠鏈哄櫒鏄惁宸叉湁鍏朵粬杩涚▼鍗犵敤鍚屼竴绔彛
-- daemon 鏄惁宸茬粡鎴愬姛鍚姩
-- `python mcp/run_mcp.py --help` 鏄惁鍙繍琛?
-## `rdx daemon status` 杩斿洖 `no active daemon`
-
-鍙兘鍘熷洜锛?
-- 璇?context 浠庢湭鍚姩 daemon
-- daemon 宸茶鏄惧紡 `stop`
-- daemon 鍥犳棤 attached client 涓旇秴杩?idle TTL 鑷姩閫€鍑?- state file 宸茶 stale cleanup 娓呯悊
-
-鍙互閲嶆柊閫氳繃锛?
-```bat
-rdx.bat
-```
-
-杩涘叆 `Start CLI` 鎴?`Start MCP`锛屽啀闄勭潃鍒扮浉鍚?context銆?
-## legacy 鍛戒护杩樿兘涓嶈兘鐢?
-鍙互銆?
-```bat
-rdx.bat cli-shell
-rdx.bat daemon-shell
-```
-
-瀹冧滑浼氭墦鍗颁竴娆″吋瀹规彁绀猴紝鐒跺悗鏄犲皠鍒版柊鐨?`Start CLI` 璇箟銆?
+长时间无人接管时，daemon 会因无 attached client 且超过 idle TTL 自动退出。

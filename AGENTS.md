@@ -9,20 +9,20 @@
 
 ## 根目录约束（强约束）
 
-- `rdx-tools/` 是唯一允许的顶层参考根目录。
-- 所有路径解析必须以 `rdx-tools` 为根，不允许依赖父目录或同级目录结构。
+- `rdx.bat` 所在目录是唯一允许的参考根目录。
+- 所有路径解析必须以 `rdx.bat` 所在目录为根，不允许依赖父目录或同级目录结构。
 - 禁止硬编码绝对路径（例如 `D:\Projects\...`）以及 `..\` 形式的父目录逃逸。
-- 启动脚本与运行时代码应优先从脚本自身位置或 `RDX_TOOLS_ROOT` 推导路径。
-- 非用户明确要求时，不得读取或写入 `rdx-tools/` 目录树之外的文件。
-- 如果发现现有逻辑引用了 `rdx-tools` 外部路径，应先改为根内相对/派生路径再继续功能开发。
+- 启动脚本与运行时代码应优先从脚本自身位置或 `RDX_TOOLS_ROOT` 推导路径。`RDX_TOOLS_ROOT` 仅用于覆盖默认根目录；默认参考根目录就是 `rdx.bat` 所在目录。
+- 非用户明确要求时，不得读取或写入以 `rdx.bat` 所在目录为根的目录树之外的文件。
+- 如果发现现有逻辑引用了参考根目录之外的路径，应先改为根内相对/派生路径再继续功能开发。
 
 ## 文档语言与格式规范（中文为主，保留英文术语）
 
-- `rdx-tools/**/*.md` 文档以中文为主。
+- 本仓库目录树内的 `*.md` 文档以中文为主。
 - 必须保留英文（并用反引号包裹）：`RenderDoc`、`rdx-tools`、`MCP`、`CLI`、`rdx.bat`、命令行示例、环境变量（例如 `RDX_*`）、文件/目录路径、代码标识符、`rd.*` tool names、JSON/YAML key。
 - 专业名词首次出现可采用“中文说明 + 英文术语”的写法，但不要把英文术语翻译成中文来替代原英文。
 - 代码块内容不改语义、不改命令；仅在代码块外用中文补充说明。
-- 编码：`rdx-tools` 下所有 `*.md` 必须使用 UTF-8 with BOM。
+- 编码（强约束）：本仓库内所有 `*.md` 必须使用 UTF-8 with BOM，禁止提交为 ANSI、GBK、UTF-8 without BOM 等其他编码；否则 GitHub 页面容易出现乱码。
 
 ## 关键入口
 
@@ -60,6 +60,61 @@
 - 运行时响应遵循 `rdx/core/contracts.py` 中的共享契约：
   - 调试时优先检查 `ok` 与 `error_message`。
 - 除非用户明确要求修改代码，否则将编辑限制在文档/配置文档范围内。
+
+## 文档自更新治理（强约束）
+
+### 触发条件
+
+只要改动影响以下任一维度，就必须同步检查并按需更新文档：
+
+- 新增、删除、重命名 `CLI` 命令或参数。
+- 新增、删除、重命名 `MCP` transport、入口行为、交互语义。
+- 新增、删除、重命名 `rd.*` tool、tool 参数、tool 返回字段或能力边界。
+- 改变 `.rdc -> session` 链路、`context`、daemon、session state、artifact 语义。
+- 改变错误面、恢复路径、帮助输出、运行时前置条件、环境变量。
+
+### 最低文档更新粒度
+
+- 不允许只改一处主文档就交付。
+- 每次影响平台模型的功能改动，至少要检查：
+  - `README.md`
+  - `docs/quickstart.md`
+  - `docs/session-model.md`
+  - `docs/agent-model.md`
+  - `docs/troubleshooting.md`
+  - `docs/tools.md`
+  - `docs/doc-governance.md`
+- 未受影响可不改，但必须在交付说明中人工确认“为何不改”。
+
+### 交付前量化门槛
+
+- 文档必须通过：
+  - `python scripts/check_markdown_health.py`
+- 若改动涉及入口或契约，必须重新跑：
+  - `python spec/validate_catalog.py`
+  - `python cli/run_cli.py --help`
+  - `python mcp/run_mcp.py --help`
+- 若改动涉及 `.rdc` 会话链路，必须至少顺序验证一次：
+  - `capture open`
+  - `capture status` 或等价状态读取链路
+
+### 交付说明要求
+
+交付时必须说明：
+
+- 更新了哪些文档。
+- 哪些文档确认无需更新，以及原因。
+- 文档验证跑了哪些命令。
+- 清理结果。
+
+### 口径底线
+
+- 规范源优先级必须与仓库主文档一致：catalog / contract 优先，runtime 其次，`CLI` 不是规范源。
+- `capture_file_id`、`session_id` 等 handle 必须写成运行时引用，不得暗示长期稳定。
+- 文档示例默认按顺序执行语义编写；除非明确声明支持并发，否则不得把并发现象写成平台定义。
+- 未验证的行为不得写成“已验证”。
+
+详见 `docs/doc-governance.md`。
 
 ## 交付前验证（强约束）
 
@@ -109,6 +164,7 @@
    - `python spec/validate_catalog.py`
    - `python cli/run_cli.py --help`
    - `python mcp/run_mcp.py --help`
+   - `python scripts/check_markdown_health.py`
 3. 只提交有意图且可解释的变更。
 
 ## 版本控制约定

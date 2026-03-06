@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Release gate checks for standalone rdx-tools package."""
 
 from __future__ import annotations
@@ -229,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     results.append(("entry:python cli/run_cli.py --help", ok_cli_help, cli_help))
     ok_bat_help, bat_help = _run(["cmd", "/c", "rdx.bat --help"], cwd=root)
     results.append(("entry:rdx.bat --help", ok_bat_help, bat_help))
+    ok_md_health, md_health = _run([sys.executable, "scripts/check_markdown_health.py"], cwd=root)
+    results.append(("docs:markdown-health", ok_md_health, md_health))
 
     # reports
     ok_reports, report_detail = _check_reports(root)
