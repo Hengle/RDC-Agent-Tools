@@ -33,6 +33,14 @@
 - `cli/run_cli.py`
 - `scripts/release_gate.py`
 
+## `scripts/` Governance
+
+- `scripts/` keeps only formal platform / governance scripts.
+- The supported script set is defined by `scripts/README.md`.
+- Do not hardcode personal machine paths, personal `adb.exe`, device serials, or desktop sample paths into formal script defaults.
+- One-off investigation scripts, single-sample probes, parameter experiments, and retrospective-only report generators do not belong in the main repo.
+- If the formal script set or script interfaces change, update `scripts/README.md`, the relevant docs, and tests in the same delivery.
+
 ## 必须保留的目录结构
 
 以下路径为运行时所需，不得删除：

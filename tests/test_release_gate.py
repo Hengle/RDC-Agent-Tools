@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
@@ -68,26 +68,10 @@ def test_release_gate_accepts_current_reports(monkeypatch, tmp_path: Path) -> No
     assert "using current smoke reports" in report
 
 
-def test_release_gate_accepts_legacy_report_suite(monkeypatch, tmp_path: Path) -> None:
+def test_release_gate_rejects_missing_current_report(monkeypatch, tmp_path: Path) -> None:
     _prepare_root(tmp_path)
-    for rel in release_gate.LEGACY_REPORT_SUITES["native-smoke"]:
+    for rel in release_gate.CURRENT_REPORTS[:-1]:
         _write_report(tmp_path, rel)
-
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
-    monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
-
-    rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md"])
-
-    assert rc == 0
-    report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
-    assert "using legacy report suite: native-smoke" in report
-
-
-def test_release_gate_rejects_native_smoke_report_alone(monkeypatch, tmp_path: Path) -> None:
-    _prepare_root(tmp_path)
-    _write_report(tmp_path, "intermediate/logs/native_smoke_report.md")
 
     monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
     monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
@@ -99,4 +83,5 @@ def test_release_gate_rejects_native_smoke_report_alone(monkeypatch, tmp_path: P
     assert rc == 1
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "FAIL `reports:smoke-suite`" in report
-    assert "legacy suite native-smoke missing: intermediate/logs/tool_contract_report.md" in report
+    assert "missing current reports:" in report
+    assert release_gate.CURRENT_REPORTS[-1] in report

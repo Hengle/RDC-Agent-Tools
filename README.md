@@ -93,6 +93,12 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - [docs/troubleshooting.md](docs/troubleshooting.md)：常见故障与恢复
 - [docs/tools.md](docs/tools.md)：tool catalog 入口与校验方式
 - [docs/android-remote-cli-smoke-prompt.md](docs/android-remote-cli-smoke-prompt.md)：桌面 / Android 分层 smoke 与 contract 测试模板
+- [scripts/README.md](scripts/README.md): formal `scripts/` chain and governance rules
+
+## Scripts
+
+See [scripts/README.md](scripts/README.md) for the formal supported script chain.
+One-off investigation scripts are not part of the supported repository interface.
 
 ## 关键约束
 

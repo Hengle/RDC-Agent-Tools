@@ -17,36 +17,13 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from rdx.runtime_paths import ensure_tools_root_env
+from scripts._shared import extract_json_payload, resolve_repo_path, trim_text, write_text
 
 ReturnCode = tuple[int, str, str, bool]
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _write_text_file(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-
-
-def _trim_text(text: str, limit: int = 8000) -> str:
-    value = (text or "").replace("\r", "").strip()
-    return value if len(value) <= limit else value[: limit - 3] + "..."
-
-
-def _extract_json_payload(text: str) -> dict[str, Any] | None:
-    if not text:
-        return None
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        payload = json.loads(text[start : end + 1])
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -116,7 +93,7 @@ def _append_result(
             "status": status,
             "reason": reason,
             "command": command,
-            "evidence": _trim_text(evidence),
+            "evidence": trim_text(evidence),
             "context_id": context_id,
         }
     )
@@ -142,7 +119,7 @@ def _cleanup_context(root: Path, context_id: str) -> tuple[bool, str]:
     )
     detail = (proc.stdout or "") + (proc.stderr or "")
     ok = proc.returncode == 0 or "no active daemon" in detail.lower()
-    return ok, _trim_text(detail)
+    return ok, trim_text(detail)
 
 
 def _status_command(root: Path, context_id: str) -> tuple[int, str]:
@@ -234,7 +211,7 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
             lines.append(f"  - reason: {item.get('reason')}")
         lines.append(f"  - command: `{item.get('command')}`")
     lines.append("")
-    _write_text_file(path, "\n".join(lines) + "\n")
+    write_text(path, "\n".join(lines) + "\n")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -371,7 +348,7 @@ def main() -> int:
     ]:
         code, out, err, timed_out = _run_command(command, cwd=root, timeout_s=60.0)
         combined = out + "\n" + err
-        payload = _extract_json_payload(combined)
+        payload = extract_json_payload(combined)
         if expect_json:
             passed = (not timed_out) and code == 0 and isinstance(payload, dict) and bool(payload.get("ok"))
         else:
@@ -392,10 +369,9 @@ def main() -> int:
         cleanup_notes[ctx] = detail
 
     payload = _build_result_payload(results, {"daemons": cleanup_daemons, "details": cleanup_notes})
-    out_json = (root / args.out_json).resolve()
-    out_md = (root / args.out_md).resolve()
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_json = resolve_repo_path(root, args.out_json)
+    out_md = resolve_repo_path(root, args.out_md)
+    write_text(out_json, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_markdown(out_md, payload)
 
     print(f"[cmd-smoke] wrote json: {out_json}")

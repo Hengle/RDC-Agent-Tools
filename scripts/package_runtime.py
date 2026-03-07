@@ -7,8 +7,15 @@ import argparse
 import hashlib
 import json
 import shutil
+import sys
 from pathlib import Path
 from typing import Iterable
+
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from scripts._shared import ensure_within_root, resolve_repo_path, tools_root, write_text
 
 
 DENY_SUFFIXES = {".pdb", ".lib", ".exp", ".ilk", ".h"}
@@ -24,11 +31,7 @@ ALLOW_PYMODULE_PATTERNS = (
 
 
 def _tools_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _default_source() -> Path:
-    return _tools_root().parents[2] / "x64" / "Development"
+    return tools_root(__file__)
 
 
 def _iter_allowed_files(src: Path) -> Iterable[Path]:
@@ -55,18 +58,21 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Package runtime binaries for rdx-tools")
-    parser.add_argument("--source", default=str(_default_source()), help="RenderDoc build output directory")
-    args = parser.parse_args()
+    parser.add_argument("--source", required=True, help="Repo-relative staging directory under the rdx-tools root")
+    return parser.parse_args(argv)
 
-    src = Path(args.source).resolve()
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    tools_root_path = _tools_root()
+    src = ensure_within_root(tools_root_path, resolve_repo_path(tools_root_path, args.source), label="runtime source")
     if not src.is_dir():
         print(f"[pack] missing source directory: {src}")
         return 1
 
-    tools_root = _tools_root()
-    out_root = tools_root / "binaries" / "windows" / "x64"
+    out_root = tools_root_path / "binaries" / "windows" / "x64"
     out_root.mkdir(parents=True, exist_ok=True)
     (out_root / "pymodules").mkdir(parents=True, exist_ok=True)
 
@@ -106,7 +112,7 @@ def main() -> int:
         "files": manifest_entries,
     }
     manifest_path = out_root / "manifest.runtime.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     print(f"[pack] wrote {manifest_path} with {len(manifest_entries)} files")
     return 0
 

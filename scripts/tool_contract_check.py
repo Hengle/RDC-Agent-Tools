@@ -13,7 +13,7 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 SCRIPT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +23,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from rdx.runtime_paths import ensure_tools_root_env, ensure_runtime_dirs, artifacts_dir, binaries_root, pymodules_dir
+from scripts._shared import extract_json_payload, resolve_repo_path
 from rdx.timeout_policy import HARNESS_DEFAULT_TIMEOUT_S, REMOTE_CONNECT_DEFAULT_TIMEOUT_MS, harness_timeout_s
 
 CANONICAL_KEYS = {"schema_version", "tool_version", "result_kind", "ok", "data", "artifacts", "error"}
@@ -41,14 +42,6 @@ REMOTE_APP_DEPENDENCY_SNIPPETS = (
     "Remote target interaction requires a live RenderDoc remote endpoint",
 )
 
-
-def _resolve_cli_path(root: Path, raw_path: str) -> Path:
-    text = str(raw_path or "").strip()
-    candidate = Path(text)
-    windows_candidate = PureWindowsPath(text)
-    if candidate.is_absolute() or (windows_candidate.drive and windows_candidate.root):
-        return candidate
-    return (root / candidate).resolve()
 
 SAMPLE_COMPATIBILITY_SNIPPETS = (
     "DebugPixel returned invalid trace",
@@ -70,10 +63,6 @@ def _catalog_path() -> Path:
     return _tools_root() / "spec" / "tool_catalog.json"
 
 
-def _default_desktop_rdc(name: str) -> Path:
-    return Path.home() / "Desktop" / name
-
-
 def _effective_timeout_s(tool_name: str, args: dict[str, Any], requested: float | None = None) -> float:
     policy_timeout = harness_timeout_s(tool_name, args)
     if requested is None or requested <= 0:
@@ -83,20 +72,6 @@ def _effective_timeout_s(tool_name: str, args: dict[str, Any], requested: float 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _extract_json_payload(text: str) -> dict[str, Any] | None:
-    if not text:
-        return None
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        payload = json.loads(text[start : end + 1])
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _payload_data(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -140,7 +115,7 @@ def _coalesce_error(
         return code, message
 
     if isinstance(raw, str) and raw.strip():
-        parsed = _extract_json_payload(raw)
+        parsed = extract_json_payload(raw)
         if parsed is not None:
             parsed_code, parsed_message = _payload_error(parsed)
             if parsed_message:
@@ -499,7 +474,7 @@ class DaemonExecutor:
     async def startup(self) -> tuple[bool, str]:
         def _start() -> tuple[bool, str]:
             code, out, err = self._run_cli(["daemon", "start"], timeout_s=40.0)
-            payload = _extract_json_payload(out)
+            payload = extract_json_payload(out)
             if code == 0 and payload and bool(payload.get("ok")):
                 return True, ""
             detail = (out + "\n" + err).strip()
@@ -512,7 +487,7 @@ class DaemonExecutor:
     async def shutdown(self) -> tuple[bool, str]:
         def _stop() -> tuple[bool, str]:
             code, out, err = self._run_cli(["daemon", "stop"], timeout_s=20.0)
-            payload = _extract_json_payload(out)
+            payload = extract_json_payload(out)
             if code == 0 and payload and bool(payload.get("ok")):
                 return True, ""
             detail = (out + "\n" + err).strip()
@@ -544,7 +519,7 @@ class DaemonExecutor:
             except subprocess.TimeoutExpired as exc:
                 return None, "", f"call timeout: {exc}"
 
-            payload = _extract_json_payload(out)
+            payload = extract_json_payload(out)
             if payload is None:
                 detail = (err or out).strip()
                 return None, out, f"non-json daemon call output (exit={code}): {detail[:500]}"
@@ -1712,7 +1687,7 @@ async def _run_transport_mcp(
                     if hasattr(result, "content") and result.content:
                         first = result.content[0]
                         text = getattr(first, "text", str(first))
-                    payload = _extract_json_payload(text)
+                    payload = extract_json_payload(text)
                     if payload is None:
                         return None, text, "non-json MCP output"
                     return payload, text, ""
@@ -2257,27 +2232,30 @@ def _load_catalog() -> tuple[list[str], dict[str, list[str]]]:
     return names, params_map
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dual-sample tool contract checker (catalog-defined tools)")
-    parser.add_argument("--local-rdc", default=str(_default_desktop_rdc("03.rdc")))
-    parser.add_argument("--remote-rdc", default=str(_default_desktop_rdc("03.rdc")))
+    parser.add_argument("--local-rdc", required=True)
+    parser.add_argument("--remote-rdc", default="")
     parser.add_argument("--transport", choices=["mcp", "daemon", "both"], default="both")
     parser.add_argument("--daemon-context-prefix", default="rdx-smoke")
     parser.add_argument("--skip-remote", action="store_true", help="Skip remote-only tools and remote matrix validation in local smoke mode.")
     parser.add_argument("--artifact-dir", default="", help="Optional artifact root for temporary data.")
     parser.add_argument("--out-json", default="intermediate/logs/tool_contract_report.json")
     parser.add_argument("--out-md", default="intermediate/logs/tool_contract_report.md")
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if (not args.skip_remote) and (not str(args.remote_rdc or "").strip()):
+        parser.error("--remote-rdc is required unless --skip-remote is set")
+    return args
 
 
 def main() -> int:
     args = _parse_args()
     root = _tools_root()
-    local_rdc = Path(args.local_rdc)
-    remote_rdc = Path(args.remote_rdc)
+    local_rdc = resolve_repo_path(root, args.local_rdc)
+    remote_rdc = resolve_repo_path(root, args.remote_rdc) if str(args.remote_rdc or "").strip() else local_rdc
 
     if args.artifact_dir:
-        os.environ["RDX_ARTIFACT_DIR"] = str(Path(args.artifact_dir))
+        os.environ["RDX_ARTIFACT_DIR"] = str(resolve_repo_path(root, args.artifact_dir))
 
     if not local_rdc.is_file():
         print(f"[contract] missing local rdc: {local_rdc}")
@@ -2329,11 +2307,11 @@ def main() -> int:
             ),
         )
 
-    out_json = _resolve_cli_path(root, args.out_json)
+    out_json = resolve_repo_path(root, args.out_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    out_md = _resolve_cli_path(root, args.out_md)
+    out_md = resolve_repo_path(root, args.out_md)
     _write_markdown_report(result, out_md)
 
     print(f"[contract] wrote json: {out_json}")

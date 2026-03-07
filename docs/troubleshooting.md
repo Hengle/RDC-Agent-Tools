@@ -26,6 +26,11 @@ rdx daemon stop
 rdx context clear
 ```
 
+## Scripts
+
+Prefer the formal script chain: `scripts/check_markdown_health.py`, `scripts/release_gate.py`, `scripts/rdx_bat_command_smoke.py`, `scripts/tool_contract_check.py`, `scripts/smoke_report_aggregator.py`, `scripts/package_runtime.py`, and `scripts/cleanup_workspace.py`.
+Do not treat one-off investigation scripts or personal debugging scripts as supported repository interfaces. See [../scripts/README.md](../scripts/README.md).
+
 ## 状态面与来源优先级是什么
 
 排查问题时，请先区分四类状态面：

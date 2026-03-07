@@ -5,11 +5,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
-from collections import defaultdict
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from scripts._shared import load_json, resolve_repo_path, tools_root, write_text
 
 
 def _now_iso() -> str:
@@ -17,24 +23,7 @@ def _now_iso() -> str:
 
 
 def _tools_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _resolve_cli_path(root: Path, raw_path: str) -> Path:
-    text = str(raw_path or "").strip()
-    candidate = Path(text)
-    windows_candidate = PureWindowsPath(text)
-    if candidate.is_absolute() or (windows_candidate.drive and windows_candidate.root):
-        return candidate
-    return (root / candidate).resolve()
-
-def _load_json(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    return tools_root(__file__)
 
 
 def _safe(v: Any) -> str:
@@ -406,14 +395,13 @@ def _write_report(
         for reason in cleanup_reasons:
             lines.append(f"  - {reason}")
 
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text(out_path, "\n".join(lines) + "\n")
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Aggregate rdx.bat and tool contract smoke outputs")
     parser.add_argument("--command-json", required=True)
     parser.add_argument("--tool-json", required=True)
-    parser.add_argument("--usability-json", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--detailed-out", default="")
     return parser.parse_args()
@@ -423,19 +411,11 @@ def main() -> int:
     args = _parse_args()
     root = _tools_root()
 
-    command_path = _resolve_cli_path(root, args.command_json)
-    tool_path = _resolve_cli_path(root, args.tool_json)
-    usability_path = _resolve_cli_path(root, args.usability_json)
-    if not command_path.is_absolute():
-        command_path = root / command_path
-    if not tool_path.is_absolute():
-        tool_path = root / tool_path
-    if not usability_path.is_absolute():
-        usability_path = root / usability_path
+    command_path = resolve_repo_path(root, args.command_json)
+    tool_path = resolve_repo_path(root, args.tool_json)
 
-    command_payload = _load_json(command_path.resolve())
-    tool_payload = _load_json(tool_path.resolve())
-    usability_payload = _load_json(usability_path.resolve())
+    command_payload = load_json(command_path.resolve())
+    tool_payload = load_json(tool_path.resolve())
 
     if not command_payload:
         print(f"[aggregate] missing command payload: {command_path}")

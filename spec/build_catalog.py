@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import zipfile
@@ -13,8 +14,25 @@ from xml.etree import ElementTree
 _TOOL_NAME_RE = re.compile(r"^rd\.[a-z]+\.[a-z0-9_]+$")
 _HEADING_RE = re.compile(r"^3\.\d+")
 _PARAM_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-_SECTION_HEADING_RE = re.compile(r"^[一二三四五六七八九十]+，")
+_SECTION_HEADING_RE = re.compile(r"^[\u4e00-\u9fff]+[\u3001\uff0c]")
 _WORD_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+_CONTEXT_GROUP = "3.17\uff0c\u4e0a\u4e0b\u6587\u5feb\u7167\u5de5\u5177 (Context Snapshot Tools)"
+_CONTEXT_TOOLS = [
+    {
+        "name": "rd.session.get_context",
+        "group": _CONTEXT_GROUP,
+        "description": "\u8bfb\u53d6\u5f53\u524d context \u5feb\u7167\uff0c\u8fd4\u56de runtime\u3001remote\u3001focus \u4e0e recent artifacts \u7684\u7ed3\u6784\u5316\u72b6\u6001\u3002",
+        "parameter_raw": "",
+        "returns_raw": "success (bool)<br>context_id (str)<br>runtime (dict): {session_id, capture_file_id, frame_index, active_event_id, backend_type}<br>remote (dict): {state, remote_id, origin_remote_id, endpoint, consumed_by_session_id}<br>focus (dict): {pixel?, resource_id?, shader_id?}<br>last_artifacts (list)<br>updated_at_ms (int)<br>error_message (str, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.session.update_context",
+        "group": _CONTEXT_GROUP,
+        "description": "\u66f4\u65b0\u5f53\u524d context \u7684 user-owned \u5b57\u6bb5\uff0c\u4f8b\u5982 focus_pixel\u3001focus_resource_id\u3001focus_shader_id \u4e0e notes\u3002",
+        "parameter_raw": "key (str)<br>value (json, \u53ef\u9009): \u4f20 null \u8868\u793a\u6e05\u9664\u5bf9\u5e94 user-owned \u5b57\u6bb5",
+        "returns_raw": "success (bool)<br>context_id (str)<br>runtime (dict): {session_id, capture_file_id, frame_index, active_event_id, backend_type}<br>remote (dict): {state, remote_id, origin_remote_id, endpoint, consumed_by_session_id}<br>focus (dict): {pixel?, resource_id?, shader_id?}<br>notes (str)<br>last_artifacts (list)<br>updated_at_ms (int)<br>error_message (str, \u53ef\u9009)",
+    },
+]
 
 
 def _extract_param_names(param_line: str) -> List[str]:
@@ -23,9 +41,9 @@ def _extract_param_names(param_line: str) -> List[str]:
         piece = piece.strip()
         if not piece:
             continue
-        m = _PARAM_NAME_RE.match(piece)
-        if m:
-            name = m.group(1)
+        match = _PARAM_NAME_RE.match(piece)
+        if match:
+            name = match.group(1)
             if name not in names:
                 names.append(name)
     return names
@@ -85,42 +103,42 @@ def _iter_text_tool_rows(text_path: Path) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     lines: List[str] = []
     for raw in text_path.read_text(encoding="utf-8-sig").splitlines():
-        m = re.match(r"^\d+:\s*(.*)$", raw)
-        if not m:
+        match = re.match(r"^\d+:\s*(.*)$", raw)
+        if not match:
             continue
-        line = m.group(1).strip()
+        line = match.group(1).strip()
         if line:
             lines.append(line)
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         if _HEADING_RE.match(line):
             current_group = line
-            i += 1
+            index += 1
             continue
         if _TOOL_NAME_RE.fullmatch(line):
             name = line
-            if i + 1 >= len(lines):
+            if index + 1 >= len(lines):
                 break
-            description = lines[i + 1].strip()
-            i += 2
+            description = lines[index + 1].strip()
+            index += 2
 
             param_parts: List[str] = []
-            while i < len(lines):
-                if lines[i].startswith("success (bool)"):
+            while index < len(lines):
+                if lines[index].startswith("success (bool)"):
                     break
-                if _TOOL_NAME_RE.fullmatch(lines[i]) or _HEADING_RE.match(lines[i]) or _SECTION_HEADING_RE.match(lines[i]):
+                if _TOOL_NAME_RE.fullmatch(lines[index]) or _HEADING_RE.match(lines[index]) or _SECTION_HEADING_RE.match(lines[index]):
                     break
-                param_parts.append(lines[i].strip())
-                i += 1
+                param_parts.append(lines[index].strip())
+                index += 1
 
             return_parts: List[str] = []
-            while i < len(lines):
-                if _TOOL_NAME_RE.fullmatch(lines[i]) or _HEADING_RE.match(lines[i]) or _SECTION_HEADING_RE.match(lines[i]):
+            while index < len(lines):
+                if _TOOL_NAME_RE.fullmatch(lines[index]) or _HEADING_RE.match(lines[index]) or _SECTION_HEADING_RE.match(lines[index]):
                     break
-                return_parts.append(lines[i].strip())
-                i += 1
+                return_parts.append(lines[index].strip())
+                index += 1
 
             rows.append(
                 {
@@ -132,12 +150,20 @@ def _iter_text_tool_rows(text_path: Path) -> List[Dict[str, str]]:
                 },
             )
             continue
-        i += 1
+        index += 1
 
     return rows
 
 
+def _normalize_source_path(source_path: Path, repo_root: Path) -> str:
+    try:
+        return source_path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return source_path.name
+
+
 def build_catalog(source_path: Path, output_path: Path) -> Dict[str, Any]:
+    repo_root = output_path.resolve().parents[1]
     if source_path.suffix.lower() == ".docx":
         rows = _iter_docx_tool_rows(source_path)
     else:
@@ -157,8 +183,24 @@ def build_catalog(source_path: Path, output_path: Path) -> Dict[str, Any]:
             },
         )
 
+    existing = {tool["name"] for tool in tools}
+    for row in _CONTEXT_TOOLS:
+        if row["name"] in existing:
+            continue
+        parameter_raw = row["parameter_raw"]
+        tools.append(
+            {
+                "name": row["name"],
+                "group": row["group"],
+                "description": row["description"],
+                "parameter_raw": parameter_raw,
+                "returns_raw": row["returns_raw"],
+                "param_names": _extract_param_names(parameter_raw),
+            },
+        )
+
     payload: Dict[str, Any] = {
-        "source_docx": str(source_path),
+        "source_path": _normalize_source_path(source_path, repo_root),
         "tool_count": len(tools),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "groups": dict(Counter(tool["group"] for tool in tools)),
@@ -169,20 +211,24 @@ def build_catalog(source_path: Path, output_path: Path) -> Dict[str, Any]:
     return payload
 
 
-def main() -> int:
-    root = Path(__file__).resolve().parent
-    desktop = Path.home() / "Desktop"
-    docx_matches = sorted(desktop.glob("RenderDoc MCP*.docx"))
-    text_fallback = root / "doc_extracted.txt"
-    if docx_matches:
-        source = docx_matches[0]
-    elif text_fallback.is_file():
-        source = text_fallback
-    else:
-        print("[spec] Missing source docx and doc_extracted.txt")
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build tool catalog for rdx-tools")
+    parser.add_argument("--source", default="spec/doc_extracted.txt", help="Source text/docx path. Defaults to the repo-local extracted text.")
+    parser.add_argument("--out", default="spec/tool_catalog.json", help="Catalog output path. Defaults to spec/tool_catalog.json.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    repo_root = Path(__file__).resolve().parents[1]
+    source_arg = Path(args.source)
+    out_arg = Path(args.out)
+    source = (repo_root / source_arg).resolve() if not source_arg.is_absolute() else source_arg.resolve()
+    output = (repo_root / out_arg).resolve() if not out_arg.is_absolute() else out_arg.resolve()
+    if not source.is_file():
+        print(f"[spec] Missing source file: {source}")
         return 1
 
-    output = root / "tool_catalog.json"
     payload = build_catalog(source, output)
     count = int(payload["tool_count"])
     print(f"[spec] Built catalog: {count} tools -> {output}")

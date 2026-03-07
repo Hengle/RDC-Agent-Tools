@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
+import sys
 from pathlib import Path
+
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from scripts._shared import tools_root
 
 
 RISKY_PATTERNS = (
@@ -31,6 +37,7 @@ REQUIRED_DOCS = (
     "docs/troubleshooting.md",
     "docs/tools.md",
     "docs/android-remote-cli-smoke-prompt.md",
+    "scripts/README.md",
 )
 REQUIRED_NAV_LINKS = {
     "README.md": (
@@ -38,12 +45,14 @@ REQUIRED_NAV_LINKS = {
         "docs/agent-model.md",
         "docs/doc-governance.md",
         "docs/tools.md",
+        "scripts/README.md",
     ),
     "docs/README.md": (
         "session-model.md",
         "agent-model.md",
         "doc-governance.md",
         "tools.md",
+        "../scripts/README.md",
     ),
     "docs/tools.md": (
         "session-model.md",
@@ -58,6 +67,7 @@ REQUIRED_NAV_LINKS = {
         "agent-model.md",
         "troubleshooting.md",
         "doc-governance.md",
+        "../scripts/README.md",
     ),
 }
 LOCAL_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
@@ -66,13 +76,8 @@ TOOL_COUNT_RE = re.compile(r"(\d+)\s*(?:[\u4e2a]\s*)?`rd\.\*`\s*tools")
 CONTRACT_COUNT_RE = re.compile(r"196\s+tools contract")
 
 
-def tools_root() -> Path:
-    env_root = os.environ.get("RDX_TOOLS_ROOT", "").strip()
-    if env_root:
-        env_path = Path(env_root).expanduser().resolve()
-        if env_path.is_dir():
-            return env_path
-    return Path(__file__).resolve().parents[1]
+def tools_root_path() -> Path:
+    return tools_root(__file__)
 
 
 def iter_markdown_files(root: Path) -> list[Path]:
@@ -193,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Markdown encoding health")
     parser.parse_args(argv)
 
-    root = tools_root()
+    root = tools_root_path()
     files = iter_markdown_files(root)
     issues: list[str] = []
     link_map: dict[str, set[str]] = {}

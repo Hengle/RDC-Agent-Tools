@@ -34,6 +34,8 @@
   - 功能变更到文档责任的映射、量化指标、提交流程。
 - `docs/android-remote-cli-smoke-prompt.md`
   - 面向开发 Agent 的分层 smoke / contract 测试模板。
+- `scripts/README.md`
+  - Formal `scripts/` chain, categories, and entry criteria.
 
 ## 3. 功能变更到文档责任的映射矩阵
 
@@ -87,6 +89,16 @@
 - `docs/configuration.md`
 - `docs/troubleshooting.md`
 - `docs/doc-governance.md`
+
+### `scripts/` Governance
+
+- `README.md`
+- `docs/README.md`
+- `docs/android-remote-cli-smoke-prompt.md`
+- `docs/doc-governance.md`
+- `docs/troubleshooting.md`
+- `scripts/README.md`
+- `AGENTS.md`
 
 ## 4. 文档口径规则
 

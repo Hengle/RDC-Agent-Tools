@@ -1,6 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from scripts import tool_contract_check
 
@@ -77,3 +79,53 @@ def test_build_args_uses_debug_pc_for_run_to_and_breakpoints(tmp_path: Path) -> 
         files,
     )
     assert breakpoint_args["breakpoints"] == [{"pc": 12}]
+
+
+def test_parse_args_requires_local_rdc(monkeypatch, tmp_path: Path) -> None:
+    out_json = tmp_path / "tool_contract_report.json"
+    out_md = tmp_path / "tool_contract_report.md"
+    monkeypatch.setattr(
+        tool_contract_check.sys,
+        "argv",
+        [
+            "tool_contract_check.py",
+            "--transport",
+            "mcp",
+            "--out-json",
+            str(out_json),
+            "--out-md",
+            str(out_md),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        tool_contract_check._parse_args()
+
+    assert exc.value.code == 2
+
+
+def test_parse_args_requires_remote_rdc_for_both_transport(monkeypatch, tmp_path: Path) -> None:
+    local_rdc = tmp_path / "local.rdc"
+    local_rdc.write_text("sample", encoding="utf-8")
+    out_json = tmp_path / "tool_contract_report.json"
+    out_md = tmp_path / "tool_contract_report.md"
+    monkeypatch.setattr(
+        tool_contract_check.sys,
+        "argv",
+        [
+            "tool_contract_check.py",
+            "--local-rdc",
+            str(local_rdc),
+            "--transport",
+            "both",
+            "--out-json",
+            str(out_json),
+            "--out-md",
+            str(out_md),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        tool_contract_check._parse_args()
+
+    assert exc.value.code == 2
