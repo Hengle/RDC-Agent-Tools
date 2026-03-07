@@ -1,4 +1,4 @@
-﻿# Troubleshooting
+﻿# 故障排查
 
 ## `rdx.bat` 双击后窗口像是“闪退”
 
@@ -26,22 +26,22 @@ rdx daemon stop
 rdx context clear
 ```
 
-## Scripts
+## `scripts/` 主链
 
-Prefer the formal script chain: `scripts/check_markdown_health.py`, `scripts/release_gate.py`, `scripts/rdx_bat_command_smoke.py`, `scripts/tool_contract_check.py`, `scripts/smoke_report_aggregator.py`, `scripts/package_runtime.py`, and `scripts/cleanup_workspace.py`.
-Do not treat one-off investigation scripts or personal debugging scripts as supported repository interfaces. See [../scripts/README.md](../scripts/README.md).
+优先使用正式支持的脚本主链：`scripts/check_markdown_health.py`、`scripts/release_gate.py`、`scripts/rdx_bat_command_smoke.py`、`scripts/tool_contract_check.py`、`scripts/smoke_report_aggregator.py`、`scripts/package_runtime.py`、`scripts/cleanup_workspace.py`。
+不要把一次性调查脚本或个人调试脚本视为受支持的仓库接口。详见 [../scripts/README.md](../scripts/README.md)。
 
 ## 状态面与来源优先级是什么
 
 排查问题时，请先区分四类状态面：
 
-- local session state
+- 本地 session state（local session state）
   - 由 `capture open` 等命令写入本地状态文件，供后续命令读取。
-- daemon state
+- daemon 状态（daemon state）
   - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
 - runtime 内部对象
   - 真正的 replay、debug、active event、controller 等进程内对象。
-- context snapshot
+- context 快照（context snapshot）
   - 由 `rd.session.get_context` 暴露的当前 context 快照，汇总 runtime / remote / focus / recent artifacts。
 
 因此：

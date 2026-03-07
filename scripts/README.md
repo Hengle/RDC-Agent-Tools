@@ -4,19 +4,19 @@
 
 ## 正式脚本分类
 
-### Runtime launcher
+### 运行时启动器
 
 - `rdx_bat_launcher.ps1`
   - `rdx.bat` 背后的 runtime launcher，不作为独立治理脚本使用。
 
-### Docs / Release Gate
+### 文档 / Release Gate
 
 - `check_markdown_health.py`
   - 文档编码、互链与治理基线检查。
 - `release_gate.py`
   - 发布前结构、入口、报告与 manifest 门禁检查。
 
-### Smoke / Contract
+### Smoke / Contract 检查
 
 - `rdx_bat_command_smoke.py`
   - `rdx.bat` 入口 smoke。
@@ -25,7 +25,7 @@
 - `smoke_report_aggregator.py`
   - 聚合 blockers / detailed 汇总报告。
 
-### Maintenance
+### 维护脚本
 
 - `package_runtime.py`
   - 复制 runtime staging 内容并生成 manifest。

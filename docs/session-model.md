@@ -43,7 +43,7 @@ remote endpoint
   - 它表示 runtime 已经建立远程连接，而不是“只保存 host/port 的占位引用”。
   - `rd.capture.open_replay` 若要进入 remote backend，必须通过 `options.remote_id` 显式引用它。
   - 一旦 remote `open_replay` 成功，该 `remote_id` 会被对应 `session_id` 消费；之后它不再是 live handle，如需新的 remote handle，必须重新 `rd.remote.connect`。
-  - If a stale `remote_id` is reused, the expected lifecycle error code is `remote_handle_consumed`.
+  - 如果复用了已经失效的 `remote_id`，预期生命周期错误码应为 `remote_handle_consumed`。
   - 它同样是运行时句柄，不应被视为长期稳定标识。
 - `frame_index`
   - 当前 replay 所选帧。
@@ -99,13 +99,13 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 
 `rdx-tools` 至少存在四类彼此相关但不等价的状态面：
 
-- local session state
+- 本地 session state（local session state）
   - 由 `capture open` 等命令写入本地状态文件，供后续命令读取。
-- daemon state
+- daemon 状态（daemon state）
   - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
 - runtime 内部对象
   - 真正的 replay、debug、active event、controller 等进程内对象。
-- context snapshot
+- context 快照（context snapshot）
   - 供 Agent 或自动化读取的 context 级快照，汇总 runtime / remote / focus / recent artifacts。
 
 补充一条 event 语义边界：
@@ -125,10 +125,10 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 
 `rdx-tools` 用 `context` 隔离多条工作链路。一个 context 下，常见状态包括：
 
-- daemon state
-- local session state
+- daemon 状态（daemon state）
+- 本地 session state（local session state）
 - runtime 内部对象
-- context snapshot
+- context 快照（context snapshot）
 
 推荐约定：
 

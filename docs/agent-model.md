@@ -10,7 +10,7 @@
 
 1. `spec/tool_catalog.json` 与共享响应契约
 2. runtime 实际行为
-3. `CLI` convenience wrapper
+3. `CLI` convenience wrapper（便捷封装）
 
 因此：
 
@@ -59,7 +59,7 @@
 - 对 remote 路径，先拿到 live `remote_id`。
   - 推荐链路是 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
   - remote `open_replay` 成功后，原 `remote_id` 会被 session 消费；不要继续对它执行 `ping` / `disconnect` / 再次 `open_replay`。
-  - If a stale handle is reused, the expected error code is `remote_handle_consumed`.
+  - 如果复用了已经失效的 handle，预期错误码应为 `remote_handle_consumed`。
   - 对 Android remote，不要假设外部 `qrenderdoc` 已经替你做了 bootstrap；`rd.remote.connect` 的 `options.transport="adb_android"` 才是平台定义入口。
 - 显式保存关键状态。
   - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
@@ -76,7 +76,7 @@
   - 先检查 `ok` 与 `error_message`。
   - 如果需要归因，再看 `error.details.source_layer`、`classification`、`capture_context`、`renderdoc_status`。
 
-## 5. 恢复 ownership
+## 5. 恢复职责 ownership
 
 仓库负责提供标准错误面与平台约束；上层 Agent / framework 负责决定：
 

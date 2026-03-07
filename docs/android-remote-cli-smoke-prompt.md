@@ -155,8 +155,6 @@
 - 如需补充命令层证据，可额外运行 `python scripts/rdx_bat_command_smoke.py`。
 - 如需生成 blockers / detailed 汇总，可在 `tool_contract_check.py` 之后补跑 `python scripts/smoke_report_aggregator.py --command-json "<command_json>" --tool-json "<tool_json>" --out "<out_md>"`。
 - 正式支持的脚本集合以 [`../scripts/README.md`](../scripts/README.md) 为准，不依赖任何专项调查脚本或历史一次性大脚本。
-- å¦éçæ blockers / detailed æ±æ»ï¼å¯å¨ `tool_contract_check.py` ä¹åè¡¥è· `python scripts/smoke_report_aggregator.py --command-json "<command_json>" --tool-json "<tool_json>" --out "<out_md>"`ã
-- æ­£å¼æ¯æçèæ¬éåä»¥ [`../scripts/README.md`](../scripts/README.md) ä¸ºåï¼ä¸ä¾èµä»»ä½ä¸é¡¹è°æ¥èæ¬æåå²ä¸æ¬¡æ§å¤§èæ¬ã
 - 这一层的目标不是“只跑完命令”，而是必须把 catalog 当前全量 tools 的结果分清楚：
   - `pass`
   - `issue`

@@ -21,7 +21,7 @@
 8. [android-remote-cli-smoke-prompt.md](android-remote-cli-smoke-prompt.md)
    复用桌面 / Android 通用的分层 smoke / contract 执行 prompt。
 9. [../scripts/README.md](../scripts/README.md)
-   Review the formal script chain and governance rules.
+   查看正式 `scripts/` 主链与治理规则。
 
 ## 文档边界
 
@@ -46,6 +46,4 @@
 - `mcp/run_mcp.py`
 - `spec/tool_catalog.json`
 - `scripts/check_markdown_health.py`
-- `scripts/README.md`
-- `scripts/README.md`
 - `scripts/README.md`

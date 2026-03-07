@@ -22,6 +22,9 @@
 - 必须保留英文（并用反引号包裹）：`RenderDoc`、`rdx-tools`、`MCP`、`CLI`、`rdx.bat`、命令行示例、环境变量（例如 `RDX_*`）、文件/目录路径、代码标识符、`rd.*` tool names、JSON/YAML key。
 - 专业名词首次出现可采用“中文说明 + 英文术语”的写法，但不要把英文术语翻译成中文来替代原英文。
 - 代码块内容不改语义、不改命令；仅在代码块外用中文补充说明。
+- 强约束：非代码块正文、标题、列表项中，不得保留可直接改写为中文的整句英文或整段英文说明；新增或更新 `*.md` 时，默认先写中文说明，再嵌入必要英文术语。
+- 强约束：如果必须引用英文原词，允许保留英文术语本体，但其外围解释、上下文承接与结论必须使用中文，不得用整段英文替代中文说明。
+- 文档审阅时，必须显式检查“是否仍存在可中文化但保留为整句英文的内容”；如存在，应先中文化再交付。
 - 编码（强约束）：本仓库内所有 `*.md` 必须使用 UTF-8 with BOM，禁止提交为 ANSI、GBK、UTF-8 without BOM 等其他编码；否则 GitHub 页面容易出现乱码。
 
 ## 关键入口
@@ -33,13 +36,13 @@
 - `cli/run_cli.py`
 - `scripts/release_gate.py`
 
-## `scripts/` Governance
+## `scripts/` 治理
 
-- `scripts/` keeps only formal platform / governance scripts.
-- The supported script set is defined by `scripts/README.md`.
-- Do not hardcode personal machine paths, personal `adb.exe`, device serials, or desktop sample paths into formal script defaults.
-- One-off investigation scripts, single-sample probes, parameter experiments, and retrospective-only report generators do not belong in the main repo.
-- If the formal script set or script interfaces change, update `scripts/README.md`, the relevant docs, and tests in the same delivery.
+- `scripts/` 目录只保留正式的平台 / 治理脚本。
+- 受支持的脚本集合以 `scripts/README.md` 为准。
+- 禁止把个人机器路径、个人 `adb.exe`、设备 serial 或桌面样本路径硬编码到正式脚本默认值中。
+- 一次性调查脚本、单样本探针、参数实验脚本、仅用于复盘的报告生成脚本，不属于主仓库正式接口。
+- 如果正式脚本集合或脚本接口发生变化，必须在同一次交付中同步更新 `scripts/README.md`、相关文档与测试。
 
 ## 必须保留的目录结构
 
@@ -135,7 +138,7 @@
 - `docs/doc-governance.md`
 - 若涉及 Android / remote / transport / 大面 smoke，再看 `docs/android-remote-cli-smoke-prompt.md`
 
-- Conflict policy: if implementation conflicts with the first-principles docs, the development Agent must reconcile code and docs in this delivery.
+- `Conflict policy:` 如果实现与这些第一性文档冲突，开发 Agent 必须在本次交付中同步协调代码与文档。
 
 开发 Agent 完成开发后，至少应按改动面自检：
 

@@ -1,4 +1,4 @@
-﻿# Quickstart
+﻿# 快速开始
 
 本文只覆盖“最短上手路径”，帮助你确认 `rdx-tools` 的入口可用，并把一份 `.rdc` 变成可操作的 session。更完整的状态模型见 [session-model.md](session-model.md)。
 

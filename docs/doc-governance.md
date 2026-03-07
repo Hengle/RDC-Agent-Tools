@@ -35,7 +35,7 @@
 - `docs/android-remote-cli-smoke-prompt.md`
   - 面向开发 Agent 的分层 smoke / contract 测试模板。
 - `scripts/README.md`
-  - Formal `scripts/` chain, categories, and entry criteria.
+  - 正式 `scripts/` 主链、分类与进入标准。
 
 ## 3. 功能变更到文档责任的映射矩阵
 

@@ -75,7 +75,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - `rd.remote.ping` 用于确认该 `remote_id` 仍然连着 live endpoint。
 - `rd.capture.open_replay` 需要通过 `options.remote_id` 显式进入 remote replay backend。
 - remote `open_replay` 一旦成功，原 `remote_id` 会被对应 `session_id` 消费；如需新的 live handle，必须重新 `rd.remote.connect`。
-- If a stale `remote_id` is reused, the expected lifecycle error code is `remote_handle_consumed`.
+- 如果复用了已经失效的 `remote_id`，预期生命周期错误码应为 `remote_handle_consumed`。
 - Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
 - `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。
@@ -93,12 +93,12 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - [docs/troubleshooting.md](docs/troubleshooting.md)：常见故障与恢复
 - [docs/tools.md](docs/tools.md)：tool catalog 入口与校验方式
 - [docs/android-remote-cli-smoke-prompt.md](docs/android-remote-cli-smoke-prompt.md)：桌面 / Android 分层 smoke 与 contract 测试模板
-- [scripts/README.md](scripts/README.md): formal `scripts/` chain and governance rules
+- [scripts/README.md](scripts/README.md)：正式 `scripts/` 主链与治理规则
 
-## Scripts
+## `scripts/` 说明
 
-See [scripts/README.md](scripts/README.md) for the formal supported script chain.
-One-off investigation scripts are not part of the supported repository interface.
+正式支持的脚本主链见 [scripts/README.md](scripts/README.md)。
+一次性调查脚本不属于受支持的仓库接口。
 
 ## 关键约束
 
