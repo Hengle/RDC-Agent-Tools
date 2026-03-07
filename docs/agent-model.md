@@ -8,7 +8,7 @@
 
 对上层 Agent 来说，判断平台定义时应遵循以下顺序：
 
-1. `spec/tool_catalog_196.json` 与共享响应契约
+1. `spec/tool_catalog.json` 与共享响应契约
 2. runtime 实际行为
 3. `CLI` convenience wrapper
 
@@ -20,13 +20,14 @@
 
 ## 2. 为什么 tools 清单不够
 
-仅有 `spec/tool_catalog_196.json` 或 tool 名称列表，通常仍不足以让 Agent 稳定工作，原因包括：
+仅有 `spec/tool_catalog.json` 或 tool 名称列表，通常仍不足以让 Agent 稳定工作，原因包括：
 
 - 某些 tool 存在前置依赖，必须先建立 session。
 - 关键状态对象需要跨步骤传递，例如 `capture_file_id`、`session_id`、`event_id`。
 - `capture_file_id`、`session_id` 是运行时句柄，不是长期稳定标识。
-- 有些操作成本更高或输出更多，若没有平台约束，Agent 容易无序扩张调用。
-- 失败恢复依赖共享契约，调用端需要明确检查 `ok` 与 `error_message`。
+- remote 路径还存在 `remote_id` consumed 生命周期，不能把它当作可无限复用的句柄。
+- 长链任务如果没有 context snapshot，模型很容易忘记上一轮 focus 与 artifact 路径。
+- 失败恢复依赖共享契约，调用端需要明确检查 `ok`、`error_message` 与 `error.details`。
 
 因此，Agent 需要的不只是 catalog，还需要平台使用模型。
 
@@ -55,15 +56,21 @@
   - 对 `.rdc` 的平台最小链路是 `rd.core.init -> rd.capture.open_file -> rd.capture.open_replay -> rd.replay.set_frame`。
 - 对 remote 路径，先拿到 live `remote_id`。
   - 推荐链路是 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
+  - remote `open_replay` 成功后，原 `remote_id` 会被 session 消费；不要继续对它执行 `ping` / `disconnect` / 再次 `open_replay`。
+  - If a stale handle is reused, the expected error code is `remote_handle_consumed`.
   - 对 Android remote，不要假设外部 `qrenderdoc` 已经替你做了 bootstrap；`rd.remote.connect` 的 `options.transport="adb_android"` 才是平台定义入口。
 - 显式保存关键状态。
   - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
+  - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
 - 把 handle 当作短生命周期引用。
   - 上层如需缓存，必须准备重建 session 的恢复路径，而不是把 handle 当成永久主键。
+- 显式参数优先于 snapshot 默认值。
+  - `rd.session.*` 只用于补充上下文，不应覆盖本轮调用显式给出的参数。
 - 优先轻量调用。
   - 先获取事件、状态、元数据，再进入导出、diff、debug 等更重的操作。
 - 失败时先看共享契约。
-  - 优先检查 `ok` 与 `error_message`，再决定重试、恢复或切换路径。
+  - 先检查 `ok` 与 `error_message`。
+  - 如果需要归因，再看 `error.details.source_layer`、`classification`、`capture_context`、`renderdoc_status`。
 
 ## 5. 恢复 ownership
 
@@ -101,6 +108,7 @@
 - 如何发现 tools
 - 如何建立与复用 session
 - 如何保存关键状态
+- 如何通过 `rd.session.get_context` / `rd.session.update_context` 维护长链状态
 - 如何处理失败与恢复
 
 上层框架文档不必描述：

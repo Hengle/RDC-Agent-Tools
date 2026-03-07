@@ -206,7 +206,7 @@ def main() -> int:
     artifact_dir = Path(args.artifact_dir)
     out_md = Path(args.out)
 
-    catalog = json.loads((ROOT / "spec" / "tool_catalog_196.json").read_text(encoding="utf-8-sig"))
+    catalog = json.loads((ROOT / "spec" / "tool_catalog.json").read_text(encoding="utf-8-sig"))
     catalog_count = int(catalog.get("tool_count") or len(catalog.get("tools", [])))
     params_map = {tool["name"]: tool.get("param_names", []) for tool in catalog["tools"]}
     replay_bound = {
@@ -305,7 +305,7 @@ def main() -> int:
     lines.append("")
     lines.append("## 工具健康评级")
     lines.append("### Replay-bound 统计口径")
-    lines.append("- 只统计 `spec/tool_catalog_196.json` 中非 `rd.remote.*` / 非 `rd.app.*`，且参数含 `session_id` 或 `capture_file_id` 的工具。")
+    lines.append("- 只统计 `spec/tool_catalog.json` 中非 `rd.remote.*` / 非 `rd.app.*`，且参数含 `session_id` 或 `capture_file_id` 的工具。")
     lines.append("- 只统计 `matrix=local` 的离线 `.rdc` 结果。")
     lines.append("- `actual_ok_true = pass && ok=true && !covered_scope_skip`。")
     lines.append("")

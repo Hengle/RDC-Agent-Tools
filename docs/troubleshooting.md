@@ -28,7 +28,7 @@ rdx context clear
 
 ## 状态面与来源优先级是什么
 
-排查问题时，请先区分三类状态面：
+排查问题时，请先区分四类状态面：
 
 - local session state
   - 由 `capture open` 等命令写入本地状态文件，供后续命令读取。
@@ -36,12 +36,14 @@ rdx context clear
   - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
 - runtime 内部对象
   - 真正的 replay、debug、active event、controller 等进程内对象。
+- context snapshot
+  - 由 `rd.session.get_context` 暴露的当前 context 快照，汇总 runtime / remote / focus / recent artifacts。
 
 因此：
 
 - `capture status` 读的是 local session state，不是直接探测 live runtime。
 - `daemon status` 读的是 daemon state，不等价于 local session state，也不保证字段完全同构。
-- 状态文件缺失，不一定等于 runtime 已完全不可用；反过来，daemon 还在，也不等于 local session state 一定存在。
+- `rd.session.get_context` 适合排查当前链路视角，但它也不是“所有 runtime 内部对象的完整转储”。
 
 ## `rdx daemon status` 返回 `no active daemon`
 
@@ -75,36 +77,6 @@ rdx context clear
 
 如果目标是继续使用当前 `.rdc` 链路，优先检查当前 context，并视情况重新执行 `capture open`。
 
-## 为什么有 local session state，但 daemon 没有附着或没有 active session 摘要
-
-这也是可能发生的。
-
-因为 local session state 与 daemon state 不是同一份数据：
-
-- 前者更像“本地命令读取入口”
-- 后者更像“daemon 生命周期与共享状态入口”
-
-如果你是非 daemon 直连路径建立的 session，local session state 可以存在，而 daemon 并没有对应附着关系。
-
-## 顺序执行有效，为什么并发观测可能读不到状态
-
-文档中的示例默认按顺序执行语义编写。
-
-如果你把 `capture open` 和 `capture status` 并发执行，`capture status` 可能在状态文件尚未写入完成前就读取，从而得到“没有 session state”的结果。
-
-这不应被上升为平台定义。除非文档明确声明支持并发，否则请按顺序链路理解文档示例。
-
-## 什么时候应该重开 `.rdc`，什么时候只需要重连 daemon / 复用 context
-
-优先按下面的思路判断：
-
-- daemon 不在了
-  - 先重连或重启 daemon。
-- daemon 在，但 local session state 缺失
-  - 先检查 context 是否一致；若只是本地状态缺失，通常重新 `capture open` 最直接。
-- local session state 在，但后续操作失败
-  - 说明问题可能在 runtime 内部对象层；上层可以选择重建 session，而不必立即怀疑 catalog 或契约。
-
 ## `CLI` 中 `--daemon-context` 放哪里
 
 `--daemon-context` 是顶层参数，必须放在子命令前：
@@ -136,44 +108,33 @@ rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --
 - 先使用 `rdx.bat` 的 `Start CLI`
 - 或把复杂 JSON 放入脚本变量后再传参
 
-## `Start MCP` 里的 `stdio` 为什么没有 URL
+## `remote_handle_consumed` 是什么
 
-这是预期行为。
+这是预期生命周期错误，不是随机故障。
 
-`stdio` transport 不提供网络端点，因此 launcher 会显示“无 URL”或等价提示。
+它表示：
 
-如果你需要网络端点，请选择 `streamable-http`。
+- 某个 `remote_id` 曾经是 live remote handle
+- 该 handle 已经被一次成功的 `rd.capture.open_replay(options.remote_id=...)` 消费
+- remote ownership 已经转移到对应 `session_id`
 
-## `streamable-http` 启动失败
+因此：
 
-优先检查：
-
-- `host` / `port` 是否可用
-- 当前机器是否已有其他进程占用同一端口
-- daemon 是否已成功启动
-- `python mcp/run_mcp.py --help` 与 `python mcp/run_mcp.py --ensure-env` 是否可运行
-
-## shell 异常关闭后会不会留下 daemon
-
-`rdx-tools` 已实现：
-
-- `attached_clients`
-- lease / heartbeat
-- idle TTL
-- stale state cleanup
-
-短时间误关 shell 后，通常仍可在相同 context 上重新附着。
-
-长时间无人接管时，daemon 会因无 attached client 且超过 idle TTL 自动退出。
+- 成功 remote `open_replay` 后，不应再对旧 `remote_id` 做 `ping` / `disconnect` / 再次 `open_replay`
+- 如需新的 live handle，必须重新 `rd.remote.connect`
+- 如果只是想确认当前链路状态，优先看 `rd.session.get_context`
 
 ## `rd.remote.connect` 成功了，但后续 `rd.capture.open_replay(options.remote_id=...)` 仍然失败
 
-先区分两类问题：
+先区分三类问题：
 
 - `rd.remote.connect` / `rd.remote.ping` 本身失败
   - 这说明 live endpoint 没建起来，不应继续使用该 `remote_id`。
 - `rd.remote.connect` / `rd.remote.ping` 成功，但 `open_replay` 失败
   - 优先检查 remote endpoint 本身、样本兼容性、以及 remote host 是否真的有可用 replay 环境。
+  - 如果 `open_replay` 失败，旧 `remote_id` 不应被视为已消费成功。
+- `open_replay` 已成功，后续再用旧 `remote_id` 报错
+  - 这时优先判断是否就是 `remote_handle_consumed`，而不是误判成 remote transport 回归。
 
 对 Android remote，`rd.remote.connect` 会负责 `adb` bootstrap；因此如果你是通过 `rdx-tools` 入口复现问题，不应再把“先手工开 `qrenderdoc`”当成默认前置。
 
@@ -188,3 +149,39 @@ rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --
 - `adb forward --list` 中是否看到了本次链路创建的本地端口
 
 如果 `rd.remote.connect` 失败，先修它；不要继续把依赖 `remote_id` 的后续报错误判成 replay 层问题。
+
+## 如何用 `rd.session.get_context` 定位长链状态
+
+当链路较长、你不确定“当前到底在哪个 session / event / remote 生命周期”时，优先执行：
+
+```bat
+rdx call rd.session.get_context --json --connect
+```
+
+重点看：
+
+- `runtime.session_id`
+- `runtime.capture_file_id`
+- `runtime.active_event_id`
+- `remote.state`
+- `remote.origin_remote_id`
+- `last_artifacts`
+
+如果需要补充用户视角焦点，而不是改 runtime 自身状态，再用：
+
+```bat
+rdx call rd.session.update_context --args-json "{\"key\":\"focus_pixel\",\"value\":\"512,384\"}" --json --connect
+```
+
+## shell 异常关闭后会不会留下 daemon
+
+`rdx-tools` 已实现：
+
+- `attached_clients`
+- lease / heartbeat
+- idle TTL
+- stale state cleanup
+
+短时间误关 shell 后，通常仍可在相同 context 上重新附着。
+
+长时间无人接管时，daemon 会因无 attached client 且超过 idle TTL 自动退出。

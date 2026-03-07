@@ -182,7 +182,7 @@ def main() -> int:
         print("[spec] Missing source docx and doc_extracted.txt")
         return 1
 
-    output = root / "tool_catalog_196.json"
+    output = root / "tool_catalog.json"
     payload = build_catalog(source, output)
     count = int(payload["tool_count"])
     print(f"[spec] Built catalog: {count} tools -> {output}")

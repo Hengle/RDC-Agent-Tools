@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_catalog_has_unique_tools_and_declared_count() -> None:
-    catalog = ROOT / "spec" / "tool_catalog_196.json"
+    catalog = ROOT / "spec" / "tool_catalog.json"
     payload = json.loads(catalog.read_text(encoding="utf-8"))
     tools = payload.get("tools", [])
     names = [str(t.get("name", "")).strip() for t in tools]

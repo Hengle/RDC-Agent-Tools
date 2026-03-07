@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 from pathlib import Path
@@ -17,6 +18,7 @@ RISKY_PATTERNS = (
 SCAN_SKIP_PREFIXES = (
     ".git/",
     "intermediate/",
+    ".pytest_cache/",
 )
 REQUIRED_DOCS = (
     "README.md",
@@ -28,6 +30,7 @@ REQUIRED_DOCS = (
     "docs/configuration.md",
     "docs/troubleshooting.md",
     "docs/tools.md",
+    "docs/android-remote-cli-smoke-prompt.md",
 )
 REQUIRED_NAV_LINKS = {
     "README.md": (
@@ -49,8 +52,18 @@ REQUIRED_NAV_LINKS = {
     "docs/doc-governance.md": (
         "../AGENTS.md",
     ),
+    "docs/android-remote-cli-smoke-prompt.md": (
+        "../README.md",
+        "session-model.md",
+        "agent-model.md",
+        "troubleshooting.md",
+        "doc-governance.md",
+    ),
 }
 LOCAL_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+PLACEHOLDER_RE = re.compile(r"\?{4,}")
+TOOL_COUNT_RE = re.compile(r"(\d+)\s*(?:[\u4e2a]\s*)?`rd\.\*`\s*tools")
+CONTRACT_COUNT_RE = re.compile(r"196\s+tools contract")
 
 
 def tools_root() -> Path:
@@ -96,6 +109,8 @@ def scan_file(root: Path, path: Path) -> tuple[list[str], set[str]]:
             if pattern in line:
                 issues.append(f"{rel}:{lineno}: suspicious mojibake fragment `{pattern}`")
                 break
+        if PLACEHOLDER_RE.search(line):
+            issues.append(f"{rel}:{lineno}: suspicious placeholder text with repeated `?`")
         for match in LOCAL_LINK_RE.finditer(line):
             target = match.group(1).strip()
             if (not target) or "://" in target or target.startswith("#") or target.startswith("mailto:"):
@@ -113,6 +128,65 @@ def scan_file(root: Path, path: Path) -> tuple[list[str], set[str]]:
             if not resolved.exists():
                 issues.append(f"{rel}:{lineno}: broken local link `{target}`")
     return issues, seen_links
+
+
+def _load_catalog(root: Path) -> dict:
+    path = root / "spec" / "tool_catalog.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_text(root: Path, rel: str) -> str:
+    return (root / rel).read_text(encoding="utf-8-sig")
+
+
+def _check_count_consistency(root: Path, issues: list[str], tool_count: int) -> None:
+    for rel in ("README.md", "docs/tools.md"):
+        text = _read_text(root, rel)
+        for match in TOOL_COUNT_RE.finditer(text):
+            if int(match.group(1)) != tool_count:
+                issues.append(f"{rel}: documented tool count `{match.group(1)}` does not match catalog tool_count `{tool_count}`")
+        if CONTRACT_COUNT_RE.search(text):
+            issues.append(f"{rel}: outdated fixed-count wording `196 tools contract`")
+        if "??????? 196" in text or "?? 196 ?" in text:
+            issues.append(f"{rel}: outdated fixed-count wording still present")
+
+
+def _check_session_tool_mentions(root: Path, issues: list[str], tool_names: set[str]) -> None:
+    if not {"rd.session.get_context", "rd.session.update_context"}.issubset(tool_names):
+        return
+    for rel in ("README.md", "docs/quickstart.md", "docs/session-model.md", "docs/agent-model.md", "docs/troubleshooting.md"):
+        text = _read_text(root, rel)
+        if "rd.session.get_context" not in text:
+            issues.append(f"{rel}: missing required mention `rd.session.get_context`")
+    for rel in ("docs/session-model.md", "docs/agent-model.md", "docs/quickstart.md"):
+        text = _read_text(root, rel)
+        if "rd.session.update_context" not in text:
+            issues.append(f"{rel}: missing required mention `rd.session.update_context`")
+
+
+def _check_remote_consumed_semantics(root: Path, issues: list[str]) -> None:
+    for rel in ("README.md", "docs/session-model.md", "docs/agent-model.md", "docs/troubleshooting.md"):
+        text = _read_text(root, rel)
+        if "remote_handle_consumed" not in text:
+            issues.append(f"{rel}: missing required remote lifecycle snippet `remote_handle_consumed`")
+
+
+def _check_agent_self_test_guidance(root: Path, issues: list[str]) -> None:
+    text = _read_text(root, "AGENTS.md")
+    required = (
+        "Conflict policy:",
+        "docs/session-model.md",
+        "docs/agent-model.md",
+        "docs/troubleshooting.md",
+        "docs/doc-governance.md",
+        "docs/android-remote-cli-smoke-prompt.md",
+        "rd.remote.connect",
+        "rd.remote.ping",
+        "rd.capture.open_replay",
+    )
+    for snippet in required:
+        if snippet not in text:
+            issues.append(f"AGENTS.md: missing self-test guidance snippet `{snippet}`")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -136,6 +210,15 @@ def main(argv: list[str] | None = None) -> int:
         for target in required_links:
             if target not in seen:
                 issues.append(f"{rel}: missing required link `{target}`")
+
+    catalog = _load_catalog(root)
+    tool_count = int(catalog.get("tool_count") or len(catalog.get("tools", [])))
+    tool_names = {str(item.get("name", "")).strip() for item in catalog.get("tools", [])}
+
+    _check_count_consistency(root, issues, tool_count)
+    _check_session_tool_mentions(root, issues, tool_names)
+    _check_remote_consumed_semantics(root, issues)
+    _check_agent_self_test_guidance(root, issues)
 
     if issues:
         print("[md] Markdown health check failed")

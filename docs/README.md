@@ -42,5 +42,5 @@
 - `rdx.bat`
 - `cli/run_cli.py`
 - `mcp/run_mcp.py`
-- `spec/tool_catalog_196.json`
+- `spec/tool_catalog.json`
 - `scripts/check_markdown_health.py`

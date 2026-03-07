@@ -1,7 +1,7 @@
 """
 RDX-MCP server with registry-driven tool registration.
 
-- Registers all catalog-defined tools from `rdx/spec/tool_catalog_196.json`
+- Registers all catalog-defined tools from `rdx/spec/tool_catalog.json`
 - Normalizes all tool responses to:
   - success: bool
   - error_message?: str
@@ -799,7 +799,7 @@ def _require(fields: Dict[str, Any], *names: str) -> None:
 def _tool_catalog_path() -> Path:
     from rdx.runtime_paths import tools_root
 
-    return tools_root() / "spec" / "tool_catalog_196.json"
+    return tools_root() / "spec" / "tool_catalog.json"
 
 
 def _load_tool_catalog() -> List[Dict[str, Any]]:

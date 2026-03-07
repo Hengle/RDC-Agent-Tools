@@ -12,7 +12,8 @@
 
 - 平台规范源是什么。
 - `.rdc` 如何进入可操作 session。
-- `context`、daemon、session state、artifact 如何协同。
+- `context`、daemon、session state、artifact、context snapshot 如何协同。
+- `remote_id` 的生命周期边界是什么。
 - 上层 Agent / framework 的责任边界在哪里。
 
 ## 2. 分层职责表
@@ -31,6 +32,8 @@
   - catalog 入口与规范源说明。
 - `docs/doc-governance.md`
   - 功能变更到文档责任的映射、量化指标、提交流程。
+- `docs/android-remote-cli-smoke-prompt.md`
+  - 面向开发 Agent 的分层 smoke / contract 测试模板。
 
 ## 3. 功能变更到文档责任的映射矩阵
 
@@ -54,24 +57,27 @@
 - `docs/troubleshooting.md`
 - `docs/tools.md`
 - `docs/doc-governance.md`
-### tool schema / contract 变更
 
-如果改动影响 `rd.*` tool、tool 参数、tool 返回字段、能力边界或共享契约，至少检查：
+### tool schema / contract / catalog 总量变更
+
+如果改动影响 `rd.*` tool、tool 参数、tool 返回字段、能力边界、共享契约，或 catalog 当前总量，至少检查：
 
 - `README.md`
 - `docs/tools.md`
 - `docs/agent-model.md`
 - `docs/doc-governance.md`
+- 如涉及开发后自测流程，再检查 `AGENTS.md`
 
 ### session / context / daemon 语义变更
 
-如果改动影响 `.rdc -> session` 链路、`context`、daemon、session state、artifact、错误恢复路径，至少检查：
+如果改动影响 `.rdc -> session` 链路、`context`、daemon、session state、artifact、context snapshot、错误恢复路径，至少检查：
 
 - `docs/session-model.md`
 - `docs/quickstart.md`
 - `docs/troubleshooting.md`
 - `docs/agent-model.md`
 - `docs/doc-governance.md`
+- 如涉及开发 Agent 自测，再检查 `docs/android-remote-cli-smoke-prompt.md`
 
 ### 运行时前置条件 / 环境变量变更
 
@@ -90,6 +96,8 @@
 - 未验证的行为不得写成“已验证”。
 - 不把并发现象写成平台定义。
 - 不把恢复 ownership 错放给仓库。
+- 如果 `remote_id` 被写入文档，必须说明它在 remote `open_replay` 成功后会被消费。
+- 如果 catalog 已公开 `rd.session.get_context` / `rd.session.update_context`，核心文档中必须能找到它们的角色说明。
 
 ## 5. 量化指标
 
@@ -125,14 +133,15 @@ python mcp/run_mcp.py --help
 ```
 
 4. 若改动影响 `.rdc` 会话链路，再顺序验证一次最小链路。
-5. 最后在交付说明中说明更新范围、无需更新项、验证范围与清理结果。
+5. 若改动影响 remote / bootstrap / transport，再按需要参考 `docs/android-remote-cli-smoke-prompt.md` 组织更完整的 smoke / contract 流程。
+6. 最后在交付说明中说明更新范围、无需更新项、验证范围与清理结果。
 
 ## 7. 自动检查与人工审阅的分工
 
 - `scripts/check_markdown_health.py`
-  - 负责结构性约束：编码、核心文档存在、核心互链。
+  - 负责结构性约束：编码、核心文档存在、核心互链、已知损坏文本模式与关键一致性断点。
 - `AGENTS.md`
-  - 负责硬约束：什么情况下必须更新文档、最低更新粒度、最低验证门槛。
+  - 负责硬约束：什么情况下必须更新文档、最低更新粒度、最低验证门槛，以及开发 Agent 自测引导。
 - 人工审阅
   - 负责语义严谨度：第一性是否正确、边界是否写清、验证口径是否受控。
 

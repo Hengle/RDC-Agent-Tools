@@ -67,7 +67,7 @@ def _tools_root() -> Path:
 
 
 def _catalog_path() -> Path:
-    return _tools_root() / "spec" / "tool_catalog_196.json"
+    return _tools_root() / "spec" / "tool_catalog.json"
 
 
 def _default_desktop_rdc(name: str) -> Path:

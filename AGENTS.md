@@ -54,8 +54,8 @@
 
 ## 协议与运行时契约
 
-- tool catalog 来源：`spec/tool_catalog_196.json`。
-- catalog 必须且只能包含 **196** 个 tools。
+- tool catalog 来源：`spec/tool_catalog.json`。
+- catalog 当前数量由 `spec/tool_catalog.json` 的 `tool_count` 定义；当前为 `198`。如后续继续增删，必须同步更新 validator、帮助输出、文档与测试口径。
 - tool 名称为规范的 `rd.*` tool names。
 - 运行时响应遵循 `rdx/core/contracts.py` 中的共享契约：
   - 调试时优先检查 `ok` 与 `error_message`。
@@ -116,6 +116,48 @@
 
 详见 `docs/doc-governance.md`。
 
+## 开发 Agent 自测引导（强约束）
+
+如果是开发 Agent 自身完成了平台开发与本地自测，不允许只根据用户随手给的一条命令就结束。应先回看这些第一性文档，再按改动面自行设计验证流程并执行：
+
+- `README.md`
+- `docs/session-model.md`
+- `docs/agent-model.md`
+- `docs/troubleshooting.md`
+- `docs/doc-governance.md`
+- 若涉及 Android / remote / transport / 大面 smoke，再看 `docs/android-remote-cli-smoke-prompt.md`
+
+- Conflict policy: if implementation conflicts with the first-principles docs, the development Agent must reconcile code and docs in this delivery.
+
+开发 Agent 完成开发后，至少应按改动面自检：
+
+- 入口 / help / catalog 改动
+  - 必须跑：
+    - `python spec/validate_catalog.py`
+    - `python cli/run_cli.py --help`
+    - `python mcp/run_mcp.py --help`
+- session / context / daemon 改动
+  - 必须至少顺序验证一次：
+    - `capture open`
+    - `capture status` 或等价状态读取链路
+  - 若当前库已公开 `rd.session.get_context` / `rd.session.update_context`，也应补一条 context 读取或更新验证。
+- remote / bootstrap 改动
+  - 必须至少顺序验证一次：
+    - `rd.remote.connect`
+    - `rd.remote.ping`
+    - `rd.capture.open_replay(options.remote_id=...)`
+  - 若 remote replay 成功，还应确认旧 `remote_id` 的 consumed 语义符合预期。
+- tool schema / error contract 改动
+  - 必须至少补一条代表性 tool 调用与一条代表性失败面验证，确认 `ok`、`error_message`、`error.details` 口径一致。
+- 大面改动或跨 transport 改动
+  - 不得只跑最短链路；必须参考 `docs/android-remote-cli-smoke-prompt.md` 自行组织分层 smoke / contract 流程。
+
+开发 Agent 交付时必须说明：
+
+- 它参考了哪些第一性文档。
+- 它为何选择当前测试流程。
+- 哪些链路已验证，哪些链路因环境限制未验证。
+- 清理结果：`已清理` 或 `未完全清理（含原因）`。
 ## 交付前验证（强约束）
 
 - 每次开发改动完成后，必须自行运行相关入口命令进行验证，不可只做静态修改即交付。
@@ -171,3 +213,6 @@
 
 - 不要提交生成的运行时输出（例如 `intermediate/**`、日志、临时构建文件）。
 - 不要提交 `*.pyc`、`.pytest_cache`、`__pycache__`。
+
+
+

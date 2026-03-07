@@ -1,6 +1,6 @@
 ﻿# Session 模型
 
-本文说明 `rdx-tools` 的平台使用模型：怎样把一份 `.rdc` 变成可操作的 session，以及 `context`、daemon、session state、artifact 分别承担什么职责。
+本文说明 `rdx-tools` 的平台使用模型：怎样把一份 `.rdc` 变成可操作的 session，以及 `context`、daemon、session state、artifact、context snapshot 分别承担什么职责。
 
 本文不讨论上层业务 workflow。shader debug、reverse、analysis、optimize 等任务策略应由上层 skills、system prompt、reference docs 决定。
 
@@ -41,13 +41,40 @@ remote endpoint
   - `rd.remote.connect` 返回的 live remote endpoint 句柄。
   - 它表示 runtime 已经建立远程连接，而不是“只保存 host/port 的占位引用”。
   - `rd.capture.open_replay` 若要进入 remote backend，必须通过 `options.remote_id` 显式引用它。
+  - 一旦 remote `open_replay` 成功，该 `remote_id` 会被对应 `session_id` 消费；之后它不再是 live handle，如需新的 remote handle，必须重新 `rd.remote.connect`。
+  - If a stale `remote_id` is reused, the expected lifecycle error code is `remote_handle_consumed`.
   - 它同样是运行时句柄，不应被视为长期稳定标识。
 - `frame_index`
   - 当前 replay 所选帧。
 - `active_event_id`
   - 当前焦点事件，常作为后续 event 级分析的起点。
+- `context snapshot`
+  - `rd.session.get_context` 返回的 context 级快照。
+  - 它汇总当前 runtime 选中的 `session_id`、`capture_file_id`、remote 生命周期、focus 与 recent artifacts，供 Agent 长链调用复用。
 
-## 2. `CLI capture open` 实际做了什么
+## 2. `rd.session.*` 的职责边界
+
+当前公开的 context 工具有两个：
+
+- `rd.session.get_context`
+  - 读取当前 context 的只读快照。
+  - 返回 `runtime`、`remote`、`focus`、`last_artifacts` 等结构化状态。
+- `rd.session.update_context`
+  - 只允许补充 user-owned 字段，例如：
+    - `focus_pixel`
+    - `focus_resource_id`
+    - `focus_shader_id`
+    - `notes`
+  - 不允许手工改写 runtime-owned 字段，例如：
+    - `session_id`
+    - `capture_file_id`
+    - `active_event_id`
+    - `remote_id`
+    - `last_artifacts`
+
+因此，`rd.session.*` 不是“伪 session 管理器”，而是“context 状态读取与补充入口”。
+
+## 3. `CLI capture open` 实际做了什么
 
 `CLI` 中的：
 
@@ -66,9 +93,9 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 
 因此，`CLI` 适合人工快速上手；`MCP` 则把同样的底层动作显式暴露给 client / Agent 自行编排。`CLI` 不是规范源，而是平台动作的 convenience wrapper。
 
-## 3. 状态面与来源优先级
+## 4. 状态面与来源优先级
 
-`rdx-tools` 至少存在三类彼此相关但不等价的状态面：
+`rdx-tools` 至少存在四类彼此相关但不等价的状态面：
 
 - local session state
   - 由 `capture open` 等命令写入本地状态文件，供后续命令读取。
@@ -76,20 +103,24 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
   - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
 - runtime 内部对象
   - 真正的 replay、debug、active event、controller 等进程内对象。
+- context snapshot
+  - 供 Agent 或自动化读取的 context 级快照，汇总 runtime / remote / focus / recent artifacts。
 
 理解状态时应按这个顺序思考：
 
 - `capture status` 读的是 local session state，不是直接探测 live runtime。
 - `daemon status` 读的是 daemon state，不等价于 local session state，也不保证字段完全同构。
+- `rd.session.get_context` 读的是当前 context 的快照，不等于“直接遍历所有 runtime 内部对象”。
 - 真正的 live replay/debug 对象存在于 runtime 内部对象层，不能简单由某一份状态文件完全代表。
 
-## 4. `context`、daemon 与 session state
+## 5. `context`、daemon 与 session state
 
 `rdx-tools` 用 `context` 隔离多条工作链路。一个 context 下，常见状态包括：
 
 - daemon state
 - local session state
 - runtime 内部对象
+- context snapshot
 
 推荐约定：
 
@@ -99,9 +130,10 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 这意味着：
 
 - `CLI` 与 `MCP` 可以共用同一套 daemon 机制。
-- 但 capture、session、active event、debug 状态按 context 隔离。
+- capture、session、active event、focus、recent artifacts 都按 context 隔离。
+- 上层 Agent 如果要跨多轮任务持续工作，优先复用同一 context，而不是把 handle 当作永久主键缓存。
 
-## 5. `--connect` 的含义
+## 6. `--connect` 的含义
 
 `CLI` 中不带 `--connect` 时：
 
@@ -115,7 +147,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 - 更适合跨多条命令持续操作同一个 session。
 - `MCP` 入口默认也依赖同一套 daemon / context 机制。
 
-## 6. artifact 的角色
+## 7. artifact 的角色
 
 artifact 是运行时产物输出目录，默认位于 `intermediate/artifacts/`，可通过 `RDX_ARTIFACT_DIR` 或 `rd.core.init` 中的 `global_env.artifact_dir` 覆盖。
 
@@ -128,23 +160,26 @@ artifact 不是 session 本身，但经常与 session 联动：
 
 因此，上层编排应把 artifact 路径视为“输出位置”，而不是“状态来源”。
 
-## 7. 示例与验证口径
+`rd.session.get_context` 中的 `last_artifacts` 只是“最近输出索引”，不是 artifact 仓库的规范源。
+
+## 8. 示例与验证口径
 
 文档中的平台链路默认按顺序执行语义描述。
 
 这意味着：
 
 - `capture open -> capture status` 表示顺序调用的推荐链路。
+- `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay` 表示 remote 入口的推荐顺序。
 - 除非显式声明支持并发，否则不应把并发观测结果视为平台定义。
 - “已验证”必须绑定具体入口和执行方式，例如 `python cli/run_cli.py ...` 的顺序调用，或 `rdx.bat` 交互 shell 中的顺序调用。
 
-## 8. 平台职责与上层职责
+## 9. 平台职责与上层职责
 
 `rdx-tools` 仓库负责：
 
 - 暴露稳定的 `rd.*` tool 能力。
 - 提供 `.rdc` 到 session 的最小平台链路。
-- 说明 `context`、daemon、session、artifact 的关系。
+- 说明 `context`、daemon、session、artifact、snapshot 的关系。
 - 说明错误恢复的入口与平台约束。
 
 上层 skills / prompts 负责：

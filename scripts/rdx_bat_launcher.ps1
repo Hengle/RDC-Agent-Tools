@@ -433,7 +433,7 @@ function Write-HelpPage {
     Write-Host '  clear'
     Write-Host ''
     Write-Host 'Tool discovery'
-    Write-Host '- spec/tool_catalog_196.json'
+    Write-Host '- spec/tool_catalog.json'
     Write-Host '- docs/'
     Write-Host ''
     Write-Host 'Context model'

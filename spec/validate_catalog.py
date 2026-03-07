@@ -7,7 +7,7 @@ from pathlib import Path
 
 def main() -> int:
     root = Path(__file__).resolve().parent
-    catalog_path = root / "tool_catalog_196.json"
+    catalog_path = root / "tool_catalog.json"
     if not catalog_path.is_file():
         print(f"[spec] Missing catalog: {catalog_path}")
         return 1
