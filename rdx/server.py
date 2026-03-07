@@ -10,6 +10,7 @@ RDX-MCP server with registry-driven tool registration.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import csv
 import difflib
 import hashlib
@@ -77,6 +78,7 @@ from rdx.runtime_paths import artifacts_dir, ensure_runtime_dirs, runtime_root
 from rdx.utils.artifact_store import ArtifactStore
 
 logger = logging.getLogger("rdx.server")
+_CURRENT_CONTEXT_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar('rdx_current_context_id', default=None)
 
 
 def _mcp_uses_daemon() -> bool:
@@ -84,6 +86,9 @@ def _mcp_uses_daemon() -> bool:
 
 
 def _runtime_context_id() -> str:
+    current = _CURRENT_CONTEXT_ID.get()
+    if current:
+        return normalize_context_id(current)
     return normalize_context_id(os.environ.get("RDX_CONTEXT_ID") or "default")
 
 
@@ -1690,11 +1695,13 @@ async def dispatch_operation(
     *,
     transport: str = "core",
     remote: bool = False,
+    context_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     await runtime_startup()
     engine = _ensure_core_engine()
     call_args = dict(args or {})
-    ctx = ExecutionContext(transport=transport, remote=remote, metadata={"context_id": _runtime_context_id()})
+    chosen_context_id = normalize_context_id(context_id or _runtime_context_id())
+    ctx = ExecutionContext(transport=transport, remote=remote, metadata={"context_id": chosen_context_id})
     arg_keys = ",".join(sorted(call_args.keys())) if call_args else "-"
     logger.info(
         "op.start transport=%s remote=%s op=%s trace_id=%s arg_keys=%s",
@@ -1704,19 +1711,23 @@ async def dispatch_operation(
         ctx.trace_id,
         arg_keys,
     )
-    payload = await engine.execute(operation, call_args, context=ctx)
-    if isinstance(payload, dict):
-        _postprocess_context_snapshot(operation, call_args, payload, ctx)
-    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
-    logger.info(
-        "op.done transport=%s op=%s trace_id=%s ok=%s duration_ms=%s",
-        transport,
-        operation,
-        str(meta.get("trace_id") or ctx.trace_id),
-        bool(payload.get("ok")) if isinstance(payload, dict) else False,
-        meta.get("duration_ms"),
-    )
-    return payload
+    token = _CURRENT_CONTEXT_ID.set(chosen_context_id)
+    try:
+        payload = await engine.execute(operation, call_args, context=ctx)
+        if isinstance(payload, dict):
+            _postprocess_context_snapshot(operation, call_args, payload, ctx)
+        meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+        logger.info(
+            "op.done transport=%s op=%s trace_id=%s ok=%s duration_ms=%s",
+            transport,
+            operation,
+            str(meta.get("trace_id") or ctx.trace_id),
+            bool(payload.get("ok")) if isinstance(payload, dict) else False,
+            meta.get("duration_ms"),
+        )
+        return payload
+    finally:
+        _CURRENT_CONTEXT_ID.reset(token)
 
 
 async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:

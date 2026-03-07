@@ -75,3 +75,32 @@ def test_macro_uses_focus_pixel_from_context(monkeypatch) -> None:
     finally:
         clear_context_snapshot()
         server._runtime.context_snapshots.clear()
+
+
+def test_dispatch_operation_respects_explicit_context_id() -> None:
+    clear_context_snapshot('ctx-demo')
+    server._runtime.context_snapshots.clear()
+    try:
+        payload = asyncio.run(
+            server.dispatch_operation(
+                'rd.session.update_context',
+                {'key': 'notes', 'value': 'ctx-demo-note'},
+                transport='test',
+                context_id='ctx-demo',
+            )
+        )
+        assert payload['ok'] is True
+        follow_up = asyncio.run(
+            server.dispatch_operation(
+                'rd.session.get_context',
+                {},
+                transport='test',
+                context_id='ctx-demo',
+            )
+        )
+        assert follow_up['ok'] is True
+        assert follow_up['data']['context_id'] == 'ctx-demo'
+        assert follow_up['data']['notes'] == 'ctx-demo-note'
+    finally:
+        clear_context_snapshot('ctx-demo')
+        server._runtime.context_snapshots.clear()

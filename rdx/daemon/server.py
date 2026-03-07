@@ -306,7 +306,7 @@ class DaemonRuntime:
             self.state["last_activity_at"] = _utc_now_iso()
         self._persist_state()
         try:
-            result = asyncio.run(dispatch_operation(operation, args, transport=transport, remote=remote))
+            result = asyncio.run(dispatch_operation(operation, args, transport=transport, remote=remote, context_id=self.daemon_context))
             return {"ok": True, "result": result}
         finally:
             with self._state_lock:
@@ -324,7 +324,7 @@ class DaemonRuntime:
         self._persist_state()
         released: Dict[str, Any] = {}
         try:
-            result = asyncio.run(dispatch_operation("rd.core.shutdown", {}, transport="daemon", remote=False))
+            result = asyncio.run(dispatch_operation("rd.core.shutdown", {}, transport="daemon", remote=False, context_id=self.daemon_context))
             if isinstance(result, dict):
                 data = result.get("data")
                 if isinstance(data, dict):
