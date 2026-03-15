@@ -88,7 +88,6 @@ def test_server_dispatch_tool_uses_policy_timeout_for_daemon_backed_mcp(monkeypa
         return {"ok": True, "result": {"ok": True, "data": {"remote_id": "remote_demo"}}}
 
     monkeypatch.setattr(server, "daemon_request", _fake_daemon_request)
-    monkeypatch.setattr(server, "_mcp_uses_daemon", lambda: True)
     monkeypatch.setattr(server, "_mcp_daemon_context", lambda: "mcp-ctx")
 
     payload = json.loads(asyncio.run(server._dispatch_tool("rd.remote.connect", {"host": "127.0.0.1"})))

@@ -1,10 +1,8 @@
 ﻿"""
-RDX-MCP server with registry-driven tool registration.
+RDX daemon/runtime server with registry-driven tool registration.
 
 - Registers all catalog-defined tools from `rdx/spec/tool_catalog.json`
-- Normalizes all tool responses to:
-  - success: bool
-  - error_message?: str
+- Produces canonical shared envelopes with `ok/data/artifacts/error/meta`
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ from rdx.context_snapshot import (
     update_user_context,
 )
 from rdx.core.artifact_publisher import ArtifactPublisher
-from rdx.core.contracts import canonical_error, env_bool
+from rdx.core.contracts import TSV_FORMAT_VERSION, canonical_error, env_bool
 from rdx.core.errors import CoreError, RuntimeToolError
 from rdx.core.engine import CoreEngine, ExecutionContext
 from rdx.core.renderdoc_status import (
@@ -73,6 +71,7 @@ from rdx.remote_bootstrap import (
 from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 from rdx.runtime_paths import artifacts_dir, ensure_runtime_dirs, runtime_root
 from rdx.utils.artifact_store import ArtifactStore
+from rdx.core.tsv_projection import project_rows, to_tsv_string
 
 logger = logging.getLogger("rdx.server")
 _CURRENT_CONTEXT_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar('rdx_current_context_id', default=None)
@@ -596,6 +595,95 @@ def _err(message: str, **fields: Any) -> str:
     payload: Dict[str, Any] = {"success": False, "error_message": str(message)}
     payload.update(fields)
     return json.dumps(payload, ensure_ascii=False, default=_json_default)
+
+
+def _projection_request(args: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
+    projection = args.get("projection")
+    if projection is None:
+        return {}
+    if not isinstance(projection, dict):
+        raise ValueError(f"{tool_name} projection must be an object")
+    kind = str(projection.get("kind") or "").strip().lower()
+    if kind and kind != "tabular":
+        raise ValueError(f"{tool_name} only supports projection.kind='tabular'")
+    return {
+        "kind": "tabular",
+        "include_tsv_text": _as_bool(projection.get("include_tsv_text"), False),
+    }
+
+
+def _tabular_projection(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    columns: Sequence[str],
+    include_tsv_text: bool,
+    details_json_path: str = "",
+    details_json_url: str = "",
+) -> Dict[str, Any]:
+    normalized_rows = [
+        {
+            **dict(row),
+            "details_json_path": str(row.get("details_json_path") or details_json_path),
+            "details_json_url": str(row.get("details_json_url") or details_json_url),
+        }
+        for row in rows
+    ]
+    header, body = project_rows(normalized_rows, columns=columns, format_version=TSV_FORMAT_VERSION)
+    tabular: Dict[str, Any] = {
+        "format_version": TSV_FORMAT_VERSION,
+        "columns": header,
+        "rows": body,
+        "row_count": len(body),
+    }
+    if details_json_path:
+        tabular["details_json_path"] = str(details_json_path)
+    if details_json_url:
+        tabular["details_json_url"] = str(details_json_url)
+    if include_tsv_text:
+        tabular["tsv_text"] = to_tsv_string(normalized_rows, columns=columns, format_version=TSV_FORMAT_VERSION)
+    return {"tabular": tabular}
+
+
+def _vfs_entries_projection(entries: Sequence[Dict[str, Any]], *, include_tsv_text: bool) -> Dict[str, Any]:
+    rows = [
+        {
+            "name": str(entry.get("name") or ""),
+            "path": str(entry.get("path") or ""),
+            "kind": str(entry.get("kind") or ""),
+            "title": str(entry.get("title") or ""),
+            "summary": str(entry.get("summary") or ""),
+            "requires_session": bool(entry.get("requires_session", False)),
+            "exists": bool(entry.get("exists", True)),
+        }
+        for entry in entries
+        if isinstance(entry, dict)
+    ]
+    return _tabular_projection(
+        rows,
+        columns=["name", "path", "kind", "title", "summary", "requires_session", "exists"],
+        include_tsv_text=include_tsv_text,
+    )
+
+
+def _artifact_rows_projection(artifacts: Sequence[Dict[str, Any]], *, include_tsv_text: bool) -> Dict[str, Any]:
+    rows = [
+        {
+            "artifact_id": str(item.get("artifact_id") or ""),
+            "type": str(item.get("type") or ""),
+            "path": str(item.get("path") or ""),
+            "url": str(item.get("url") or ""),
+            "mime": str(item.get("mime") or ""),
+            "size_bytes": int(item.get("size_bytes") or 0),
+            "storage_backend": str(item.get("storage_backend") or ""),
+        }
+        for item in artifacts
+        if isinstance(item, dict)
+    ]
+    return _tabular_projection(
+        rows,
+        columns=["artifact_id", "type", "path", "url", "mime", "size_bytes", "storage_backend"],
+        include_tsv_text=include_tsv_text,
+    )
 
 
 def _capability_entry(
@@ -4872,6 +4960,15 @@ async def _dispatch_util(action: str, args: Dict[str, Any]) -> str:
     if action == "list_artifacts":
         prefix = str(args.get("prefix", ""))
         artifacts = _artifact_store.list_artifacts(prefix=prefix)
+        projection = _projection_request(args, "rd.util.list_artifacts")
+        if projection:
+            return _ok(
+                artifacts=artifacts,
+                projections=_artifact_rows_projection(
+                    artifacts,
+                    include_tsv_text=bool(projection.get("include_tsv_text", False)),
+                ),
+            )
         return _ok(artifacts=artifacts)
 
     if action == "cleanup_artifacts":
@@ -4908,6 +5005,7 @@ def _vfs_entry(
     *,
     kind: str = "directory",
     title: str = "",
+    summary: str = "",
     requires_session: bool = False,
     canonical_tools: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
@@ -4916,6 +5014,8 @@ def _vfs_entry(
         "path": _vfs_normalize_path(path),
         "kind": kind,
         "title": str(title or ""),
+        "summary": str(summary or title or ""),
+        "exists": True,
         "requires_session": bool(requires_session),
         "canonical_tools": list(canonical_tools or []),
     }
@@ -4926,6 +5026,7 @@ def _vfs_node(
     *,
     kind: str,
     title: str,
+    summary: str = "",
     requires_session: bool = False,
     canonical_tools: Optional[Sequence[str]] = None,
     data: Any = None,
@@ -4939,6 +5040,8 @@ def _vfs_node(
         "name": name,
         "kind": kind,
         "title": title,
+        "summary": str(summary or title or ""),
+        "exists": True,
         "requires_session": bool(requires_session),
         "canonical_tools": list(canonical_tools or []),
     }
@@ -5343,15 +5446,34 @@ async def _vfs_build_tree(path: str, args: Dict[str, Any], depth: int) -> Dict[s
 
 async def _dispatch_vfs(action: str, args: Dict[str, Any]) -> str:
     path = _vfs_normalize_path(args.get("path"))
+    if args.get("projection") is not None and action != "ls":
+        return _err(
+            f"rd.vfs.{action} does not support tabular projection",
+            code="projection_not_supported",
+            category="validation",
+            details={"tool_name": f"rd.vfs.{action}", "supported_projection": "tabular", "supported_actions": ["ls"]},
+        )
     if action == "ls":
         node = await _vfs_resolve_node(path, args)
-        return _ok(path=path, entries=list(node.get("entries") or []))
+        entries = list(node.get("entries") or [])
+        projection = _projection_request(args, "rd.vfs.ls")
+        if projection:
+            return _ok(
+                path=path,
+                node=node,
+                entries=entries,
+                projections=_vfs_entries_projection(
+                    entries,
+                    include_tsv_text=bool(projection.get("include_tsv_text", False)),
+                ),
+            )
+        return _ok(path=path, node=node, entries=entries)
     if action == "cat":
         node = await _vfs_resolve_node(path, args)
         return _ok(path=path, node=node)
     if action == "resolve":
         node = await _vfs_resolve_node(path, args)
-        return _ok(path=path, resolved=node)
+        return _ok(path=path, node=node)
     if action == "tree":
         depth = max(0, _as_int(args.get("depth"), 2))
         tree = await _vfs_build_tree(path, args, depth)

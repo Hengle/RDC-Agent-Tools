@@ -39,9 +39,9 @@ rdx.bat
 在 `CLI` shell 中执行：
 
 ```bat
-rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
+rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 rdx capture status
-rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --json --connect
+rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --format json
 rdx daemon status
 ```
 
@@ -58,15 +58,16 @@ rdx daemon status
 如果后续要把同一条链路交给上层 Agent 继续使用，建议额外查看：
 
 ```bat
-rdx call rd.session.get_context --json --connect
+rdx call rd.session.get_context --format json
 ```
 
 如果想用只读路径式方式快速探索当前 frame，也可以直接查看：
 
 ```bat
-rdx vfs ls --path / --connect --json
-rdx vfs tree --path /draws --depth 2 --connect --json
-rdx vfs cat --path /pipeline --connect --json
+rdx vfs ls --path / --format json
+rdx vfs ls --path / --format tsv
+rdx vfs tree --path /draws --depth 2 --format json
+rdx vfs cat --path /pipeline --format json
 ```
 
 `rd.vfs.*` / `rdx vfs *` 只负责导航与读取；真正的修改、导出、切换与 context 更新仍继续走原有 `rd.*` tools。

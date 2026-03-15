@@ -94,8 +94,9 @@ class CoreEngine:
                 raw = {"raw": raw}
 
         if isinstance(raw, dict) and all(
-            key in raw for key in ("schema_version", "tool_version", "result_kind", "ok", "data", "artifacts", "error")
+            key in raw for key in ("schema_version", "tool_version", "result_kind", "ok", "data", "artifacts", "error", "meta")
         ):
+            raw.setdefault("projections", {})
             return raw
 
         if not isinstance(raw, dict):
@@ -107,7 +108,7 @@ class CoreEngine:
                 data = {
                     k: v
                     for k, v in raw.items()
-                    if k not in {"success", "error_message", "ok", "error", "schema_version", "tool_version", "result_kind", "data", "artifacts", "meta"}
+                    if k not in {"success", "error_message", "ok", "error", "schema_version", "tool_version", "result_kind", "data", "artifacts", "meta", "projections"}
                 }
                 artifacts = await self.artifact_publisher.publish_candidates(
                     collect_artifact_candidates(raw),
@@ -117,6 +118,7 @@ class CoreEngine:
                     result_kind=str(operation),
                     data=data,
                     artifacts=artifacts,
+                    projections=dict(raw.get("projections") or {}),
                     trace_id=ctx.trace_id,
                     transport=ctx.transport,
                 )
@@ -140,6 +142,7 @@ class CoreEngine:
                     "error_code",
                     "category",
                     "details",
+                    "projections",
                 }
             }
             explicit_details = raw.get("details")
@@ -151,6 +154,7 @@ class CoreEngine:
                 category=str(raw.get("category") or "runtime"),
                 message=error_message,
                 details=details,
+                meta=dict(raw.get("meta") or {}),
                 trace_id=ctx.trace_id,
                 transport=ctx.transport,
             )
@@ -168,6 +172,7 @@ class CoreEngine:
                     result_kind=str(raw.get("result_kind") or operation),
                     data=dict(raw.get("data") or {}),
                     artifacts=artifacts,
+                    projections=dict(raw.get("projections") or {}),
                     meta=dict(raw.get("meta") or {}),
                     trace_id=ctx.trace_id,
                     transport=ctx.transport,

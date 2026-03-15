@@ -1,6 +1,6 @@
 ﻿# Session 模型
 
-本文说明 `rdx-tools` 的平台使用模型：怎样把一份 `.rdc` 变成可操作的 session，以及 `context`、daemon、session state、artifact、context snapshot 分别承担什么职责。
+本文说明 `rdx-tools` 的平台使用模型：怎样把一份 `.rdc` 变成可操作的 session，以及 `context`、daemon、artifact、context snapshot 分别承担什么职责。
 
 本文不讨论上层业务 workflow。shader debug、reverse、analysis、optimize 等任务策略应由上层 skills、system prompt、reference docs 决定。
 
@@ -81,7 +81,7 @@ remote endpoint
 `CLI` 中的：
 
 ```bat
-rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
+rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 ```
 
 不是单一 tool，而是对以下平台动作的封装：
@@ -90,17 +90,14 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 2. `rd.capture.open_file`
 3. `rd.capture.open_replay`
 4. `rd.replay.set_frame`
-5. 保存本地 session state
-6. 如果带 `--connect`，再把状态同步到当前 context 的 daemon
+5. 由当前 context 的 daemon 统一持有 runtime / context 状态
 
-因此，`CLI` 是本地直接执行入口，可供人工、脚本、CI 与本地 Agent 复用；`MCP` 则把同样的底层动作以协议桥接的方式暴露给外部宿主。`CLI` 不是规范源，而是平台动作的 convenience wrapper。
+因此，`CLI` 是 daemon-backed 本地命令入口，可供人工、脚本、CI 与本地 Agent 复用；`MCP` 则把同样的底层动作以协议桥接的方式暴露给外部宿主。两者都不拥有独立 runtime；`CLI` 不是规范源，而是平台动作的 convenience wrapper。
 
 ## 4. 状态面与来源优先级
 
-`rdx-tools` 至少存在四类彼此相关但不等价的状态面：
+`rdx-tools` 至少存在三类彼此相关但不等价的状态面：
 
-- 本地 session state（local session state）
-  - 由 `capture open` 等命令写入本地状态文件，供后续命令读取。
 - daemon 状态（daemon state）
   - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
 - runtime 内部对象
@@ -116,8 +113,8 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 
 理解状态时应按这个顺序思考：
 
-- `capture status` 读的是 local session state，不是直接探测 live runtime。
-- `daemon status` 读的是 daemon state，不等价于 local session state，也不保证字段完全同构。
+- `capture status` 读的是当前 context 的 daemon / snapshot 摘要，不是 adapter-local 状态文件。
+- `daemon status` 读的是 daemon state，不等于“直接遍历所有 runtime 内部对象”。
 - `rd.session.get_context` 读的是当前 context 的快照，不等于“直接遍历所有 runtime 内部对象”。
 - 真正的 live replay/debug 对象存在于 runtime 内部对象层，不能简单由某一份状态文件完全代表。
 - `last_artifacts` 是有界 recent index，而不是 artifact 仓库本身；当前 retention policy 默认为 `total_limit=32`、`per_type_limit=8`。
@@ -127,7 +124,6 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 `rdx-tools` 用 `context` 隔离多条工作链路。一个 context 下，常见状态包括：
 
 - daemon 状态（daemon state）
-- 本地 session state（local session state）
 - runtime 内部对象
 - context 快照（context snapshot）
 
@@ -144,26 +140,20 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 
 补充一条入口选择原则：
 
-- 能直接访问本地进程、文件系统与 daemon 的宿主，默认 local-first，优先使用 `CLI` 或直接本地 runtime。
-- 是否启用 daemon，取决于是否需要长期供应 live runtime / context，而不是取决于是否使用 `MCP`。
+- 能直接访问本地进程、文件系统与 daemon 的宿主，默认 local-first，优先使用 daemon-backed `CLI`。
 - 只有宿主不能直达本地环境，或用户明确要求按 `MCP` 接入时，才应切换到 `MCP`。
 - 不论走 `CLI` 还是 `MCP`，上层 Agent 都应先向用户说明当前采用的入口模式。
 - 如果选择 `MCP`，但宿主没有配置对应 MCP server，必须显式阻断并提示配置。
 
-## 6. `--connect` 的含义
+## 6. daemon-backed `CLI`
 
-`CLI` 中不带 `--connect` 时：
+`CLI` 中所有业务命令都通过当前 context 的 daemon 执行或复用状态。
 
-- 命令在本次进程内直接执行。
-- session state 只保存本地状态文件，便于后续读取。
-- 不依赖 daemon 存活。
+这意味着：
 
-带 `--connect` 时：
-
-- 命令通过当前 context 的 daemon 执行或复用状态。
-- 更适合跨多条命令持续操作同一个 session。
-- `MCP` 入口默认也依赖同一套 daemon / context 机制。
+- `CLI` 与 `MCP` 默认依赖同一套 daemon / context 机制。
 - 长操作期间的中间状态以 daemon `active_operation` 为准，而不是靠日志文本猜测。
+- `CLI` 不再提供独立 runtime / session truth。
 
 ## 7. artifact 的角色
 

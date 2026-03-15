@@ -38,29 +38,34 @@ _MANUAL_TOOLS = [
         "name": "rd.vfs.ls",
         "group": _VFS_GROUP,
         "description": "\u4ee5 JSON-first \u65b9\u5f0f\u5217\u51fa read-only VFS \u8282\u70b9\uff0c\u7528\u4e8e\u63a2\u7d22 draws/passes/resources/context/artifacts \u7b49\u8def\u5f84\u7a7a\u95f4\u3002",
-        "parameter_raw": "path (str, \u53ef\u9009, \u9ed8\u8ba4 '/'): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
-        "returns_raw": "success (bool)<br>path (str)<br>entries (list[dict]): \u6bcf\u9879\u5305\u542b {name, path, kind, requires_session, summary?}<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
+        "parameter_raw": "path (str, \u53ef\u9009, \u9ed8\u8ba4 '/'): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session<br>projection (dict, \u53ef\u9009): \u5f53 kind='tabular' \u65f6\u8fd4\u56de entries \u7684\u7edf\u4e00\u8868\u683c\u6458\u8981",
+        "returns_raw": "ok (bool)<br>data (dict): {path, node, entries}<br>projections.tabular (dict, \u53ef\u9009): {format_version, columns, rows, row_count, tsv_text?}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
+        "supports_projection": {"tabular": True},
+        "prerequisites": [],
     },
     {
         "name": "rd.vfs.cat",
         "group": _VFS_GROUP,
         "description": "\u8bfb\u53d6 read-only VFS \u8282\u70b9\u7684 JSON \u8868\u793a\uff0c\u4e0d\u65b0\u589e\u7b2c\u4e8c\u5957\u5e73\u884c\u771f\u76f8\uff0c\u800c\u662f\u5bf9\u5e95\u5c42 rd.* \u80fd\u529b\u7684\u5bfc\u822a\u5c01\u88c5\u3002",
         "parameter_raw": "path (str): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
-        "returns_raw": "success (bool)<br>path (str)<br>kind (str): \u8282\u70b9\u7c7b\u578b<br>value (json): \u8282\u70b9\u7684 JSON \u503c<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {path, node}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
+        "prerequisites": [],
     },
     {
         "name": "rd.vfs.tree",
         "group": _VFS_GROUP,
         "description": "\u6309\u7167 VFS \u8def\u5f84\u8fd4\u56de\u6811\u5f62 read-only \u89c6\u56fe\uff0c\u9ed8\u8ba4\u4ee5\u7ed3\u6784\u5316 JSON \u8868\u793a\u8282\u70b9\u4e0e children\u3002",
         "parameter_raw": "path (str, \u53ef\u9009, \u9ed8\u8ba4 '/'): VFS \u8d77\u70b9\u8def\u5f84<br>depth (int, \u53ef\u9009, \u9ed8\u8ba4 2): \u9012\u5f52\u6df1\u5ea6<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
-        "returns_raw": "success (bool)<br>path (str)<br>depth (int)<br>tree (dict): \u5305\u542b {name, path, kind, children?}<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {path, tree}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
+        "prerequisites": [],
     },
     {
         "name": "rd.vfs.resolve",
         "group": _VFS_GROUP,
         "description": "\u89e3\u6790 VFS \u8def\u5f84\u5230\u5bf9\u5e94\u8282\u70b9\u5143\u6570\u636e\uff0c\u7528\u4e8e\u5224\u65ad path \u662f\u5426\u5b58\u5728\u3001\u662f\u5426\u9700\u8981 session \u4ee5\u53ca\u53ef\u4f7f\u7528\u54ea\u7c7b\u89c6\u56fe\u3002",
         "parameter_raw": "path (str): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
-        "returns_raw": "success (bool)<br>path (str)<br>node (dict): \u5305\u542b {name, path, kind, exists, requires_session, operations, summary?}<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {path, node}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
+        "prerequisites": [],
     },
 ]
 _STATE_PREREQUISITES = {
@@ -94,6 +99,37 @@ def _extract_param_names(param_line: str) -> List[str]:
             if name not in names:
                 names.append(name)
     return names
+
+
+def _normalize_returns_raw(returns_raw: str) -> str:
+    text = str(returns_raw or "")
+    if "data (dict)" in text and "error (dict" in text and "meta (dict)" in text:
+        return text
+    fields: List[str] = []
+    for piece in text.replace("<2>", "<br>").split("<br>"):
+        piece = piece.strip()
+        if not piece:
+            continue
+        match = _PARAM_NAME_RE.match(piece)
+        if not match:
+            continue
+        name = match.group(1)
+        if name in {"success", "ok", "error_message"}:
+            continue
+        if name not in fields:
+            fields.append(name)
+    if fields:
+        data_desc = "{%s}" % ", ".join(fields)
+    else:
+        data_desc = "tool-specific payload"
+    return (
+        "ok (bool)<br>"
+        f"data (dict): {data_desc}<br>"
+        "artifacts (list)<br>"
+        "error (dict|null)<br>"
+        "meta (dict)<br>"
+        "projections (dict, 可选)"
+    )
 
 
 def _text_from_node(node: ElementTree.Element) -> str:
@@ -283,34 +319,38 @@ def build_catalog(source_path: Path, output_path: Path) -> Dict[str, Any]:
     tools: List[Dict[str, Any]] = []
     for row in rows:
         parameter_raw = row["parameter_raw"]
-        tools.append(
-            {
-                "name": row["name"],
-                "group": row["group"],
-                "description": row["description"],
-                "parameter_raw": parameter_raw,
-                "returns_raw": row["returns_raw"],
-                "param_names": _extract_param_names(parameter_raw),
-                "prerequisites": _infer_prerequisites(row["name"], _extract_param_names(parameter_raw)),
-            },
-        )
+        tool_payload = {
+            "name": row["name"],
+            "group": row["group"],
+            "description": row["description"],
+            "parameter_raw": parameter_raw,
+            "returns_raw": _normalize_returns_raw(row["returns_raw"]),
+            "param_names": _extract_param_names(parameter_raw),
+            "prerequisites": list(row["prerequisites"]) if isinstance(row.get("prerequisites"), list) else _infer_prerequisites(row["name"], _extract_param_names(parameter_raw)),
+        }
+        for extra_key in ("supports_projection",):
+            if extra_key in row:
+                tool_payload[extra_key] = row[extra_key]
+        tools.append(tool_payload)
 
     existing = {tool["name"] for tool in tools}
     for row in _MANUAL_TOOLS:
         if row["name"] in existing:
             continue
         parameter_raw = row["parameter_raw"]
-        tools.append(
-            {
-                "name": row["name"],
-                "group": row["group"],
-                "description": row["description"],
-                "parameter_raw": parameter_raw,
-                "returns_raw": row["returns_raw"],
-                "param_names": _extract_param_names(parameter_raw),
-                "prerequisites": _infer_prerequisites(row["name"], _extract_param_names(parameter_raw)),
-            },
-        )
+        tool_payload = {
+            "name": row["name"],
+            "group": row["group"],
+            "description": row["description"],
+            "parameter_raw": parameter_raw,
+            "returns_raw": _normalize_returns_raw(row["returns_raw"]),
+            "param_names": _extract_param_names(parameter_raw),
+            "prerequisites": list(row["prerequisites"]) if isinstance(row.get("prerequisites"), list) else _infer_prerequisites(row["name"], _extract_param_names(parameter_raw)),
+        }
+        for extra_key in ("supports_projection",):
+            if extra_key in row:
+                tool_payload[extra_key] = row[extra_key]
+        tools.append(tool_payload)
 
     tools = _apply_overlay(tools, _load_overlay())
 

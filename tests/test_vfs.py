@@ -86,3 +86,11 @@ def test_vfs_draw_shader_path_routes_through_pipeline_tools(monkeypatch) -> None
     assert payload["node"]["data"]["shader_id"] == "shader-ps"
     assert calls[0] == ("rd.pipeline.get_state", {"session_id": "sess_demo", "event_id": 42})
     assert calls[1] == ("rd.pipeline.get_shader", {"session_id": "sess_demo", "event_id": 42, "stage": "ps"})
+
+
+@pytest.mark.unit
+def test_vfs_resolve_uses_node_key() -> None:
+    payload = json.loads(asyncio.run(server._dispatch_vfs("resolve", {"path": "/"})))
+
+    assert payload["success"] is True
+    assert payload["node"]["path"] == "/"

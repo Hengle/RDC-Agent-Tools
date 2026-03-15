@@ -9,7 +9,7 @@ from scripts import tool_contract_check
 
 def test_classify_result_uses_structured_capability_details() -> None:
     payload = {
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "tool_version": "1.0.0",
         "result_kind": "rd.shader.extract_binary",
         "ok": False,
@@ -25,6 +25,8 @@ def test_classify_result_uses_structured_capability_details() -> None:
                 "source": "runtime_build",
             },
         },
+        "meta": {},
+        "projections": {},
     }
 
     status, reason, error_code, issue_type, fix_hint, impact_scope = tool_contract_check._classify_result(

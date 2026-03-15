@@ -98,6 +98,14 @@ def _iter_schema_errors(payload: dict[str, Any]) -> list[str]:
             if key in seen:
                 issues.append(f"{name}: duplicate prerequisite {requires} when={when or '<always>'}")
             seen.add(key)
+        supports_projection = item.get("supports_projection")
+        if supports_projection is not None:
+            if not isinstance(supports_projection, dict):
+                issues.append(f"{name}: supports_projection must be an object")
+            elif supports_projection.get("tabular"):
+                param_names = item.get("param_names", [])
+                if not isinstance(param_names, list) or "projection" not in param_names:
+                    issues.append(f"{name}: tabular projection requires projection in param_names")
     return issues
 
 

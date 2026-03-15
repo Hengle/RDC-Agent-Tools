@@ -20,10 +20,10 @@
 
 补充一条入口边界：
 
-- `CLI` 是本地直接执行入口。
+- `CLI` 是 daemon-backed 本地命令入口。
 - daemon 是长生命周期 runtime / context 持有层。
 - `MCP` 是把 catalog 能力桥接给外部宿主的协议入口。
-- catalog 本身不偏向 `CLI` 或 `MCP`；入口选择取决于宿主是否能直接进入本地环境，以及任务是否需要长期供应 live runtime / context。
+- catalog 本身不偏向 `CLI` 或 `MCP`；两者都依赖同一 daemon-owned runtime / context。
 
 ## 当前新增入口
 
@@ -39,7 +39,7 @@
 其中 `rd.vfs.*` 的定位是：
 
 - 只读探索层，主要服务人类与 Agent 的路径式浏览。
-- 输出仍然是结构化 JSON，不再引入第二套 TSV/文本真相。
+- canonical truth 仍然是结构化 JSON；其中 `rd.vfs.ls` 可额外请求统一 tabular projection 作为 entries 摘要。
 - `rd.vfs.*` 只负责导航、解析和读取，不负责修改 runtime、切换 event、导出资源或更新 context。
 - 真正的 canonical tools 仍然是原有 `rd.*` 结构化接口；`rd.vfs.*` 会把这些 canonical tools 作为节点元数据暴露出来。
 

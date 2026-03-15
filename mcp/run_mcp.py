@@ -275,7 +275,6 @@ def main(argv: Iterable[str] | None = None) -> int:
         return RETURN_STARTUP_ERROR
 
     try:
-        os.environ["RDX_MCP_USE_DAEMON"] = "1"
         if transport == "sse":
             server.main_sse()
         elif transport == "streamable-http":

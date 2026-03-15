@@ -26,7 +26,7 @@ from rdx.runtime_paths import ensure_tools_root_env, ensure_runtime_dirs, artifa
 from scripts._shared import extract_json_payload, resolve_repo_path
 from rdx.timeout_policy import HARNESS_DEFAULT_TIMEOUT_S, REMOTE_CONNECT_DEFAULT_TIMEOUT_MS, harness_timeout_s
 
-CANONICAL_KEYS = {"schema_version", "tool_version", "result_kind", "ok", "data", "artifacts", "error"}
+CANONICAL_KEYS = {"schema_version", "tool_version", "result_kind", "ok", "data", "artifacts", "error", "meta"}
 DESTRUCTIVE_TAIL = ("rd.capture.close_replay", "rd.capture.close_file", "rd.core.shutdown")
 SESSION_ERROR_SNIPPETS = (
     "Unknown session_id",
@@ -513,8 +513,8 @@ class DaemonExecutor:
                         name,
                         "--args-json",
                         json.dumps(args, ensure_ascii=False),
-                        "--json",
-                        "--connect",
+                        "--format",
+                        "json",
                     ],
                     timeout_s=effective_timeout_s,
                 )
@@ -2238,7 +2238,7 @@ async def _run_transport_daemon(
                         evidence="tool requires remote scope and has been skipped for local-only run",
                         repro_command=(
                             f"python cli/run_cli.py --daemon-context {context_name} call {name} "
-                            f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"
+                            f"--args-json '{json.dumps(args, ensure_ascii=False)}' --format json"
                         ),
                         contract=False,
                     ),

@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from rdx import __version__ as _TOOL_VERSION
 
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "3.0.0"
 TSV_FORMAT_VERSION = "1.0.0"
 
 
@@ -100,6 +100,7 @@ def canonical_success(
     result_kind: str,
     data: Optional[Dict[str, Any]] = None,
     artifacts: Optional[List[Dict[str, Any]]] = None,
+    projections: Optional[Dict[str, Any]] = None,
     meta: Optional[Dict[str, Any]] = None,
     trace_id: Optional[str] = None,
     transport: str = "core",
@@ -116,14 +117,12 @@ def canonical_success(
         "tool_version": tool_version(),
         "result_kind": str(result_kind),
         "ok": True,
-        "success": True,
         "data": dict(data or {}),
         "artifacts": list(artifacts or []),
         "error": None,
         "meta": out_meta,
+        "projections": dict(projections or {}),
     }
-    # Backward-compat shadow fields for existing consumers.
-    payload.update(dict(data or {}))
     return payload
 
 
@@ -151,8 +150,6 @@ def canonical_error(
         "tool_version": tool_version(),
         "result_kind": str(result_kind),
         "ok": False,
-        "success": False,
-        "error_message": str(message),
         "data": {},
         "artifacts": list(artifacts or []),
         "error": {
@@ -162,6 +159,7 @@ def canonical_error(
             "details": dict(details or {}),
         },
         "meta": out_meta,
+        "projections": {},
     }
     return payload
 

@@ -16,10 +16,10 @@ from multiprocessing.connection import Listener
 from pathlib import Path
 from typing import Any, Dict
 
+from rdx import server_runtime
 from rdx.daemon.client import (
     DEFAULT_IDLE_TIMEOUT_S,
     DEFAULT_LEASE_TIMEOUT_S,
-    clear_session_state,
     save_daemon_state,
 )
 from rdx.progress import ProgressEvent, ProgressSink
@@ -283,6 +283,23 @@ class DaemonRuntime(ProgressSink):
             else:
                 self.state[key] = str(value or "")
 
+    def _refresh_state_from_runtime_locked(self) -> None:
+        snapshot = server_runtime._context_snapshot(self.daemon_context)
+        runtime_payload = snapshot.get("runtime", {}) if isinstance(snapshot, dict) else {}
+        if not isinstance(runtime_payload, dict):
+            runtime_payload = {}
+        capture_file_id = str(runtime_payload.get("capture_file_id") or "")
+        capture_path = ""
+        if capture_file_id:
+            handle = server_runtime._runtime.captures.get(capture_file_id)
+            if handle is not None:
+                capture_path = str(handle.file_path or "")
+        self.state["session_id"] = str(runtime_payload.get("session_id") or "")
+        self.state["capture_file_id"] = capture_file_id
+        self.state["capture_path"] = capture_path
+        self.state["active_event_id"] = int(runtime_payload.get("active_event_id") or 0)
+        self.state["frame_index"] = int(runtime_payload.get("frame_index") or 0)
+
     def _handle_attach_client(self, params: Dict[str, Any]) -> Dict[str, Any]:
         client_id = str(params.get("client_id") or "").strip()
         if not client_id:
@@ -367,6 +384,8 @@ class DaemonRuntime(ProgressSink):
                         progress_sink=self,
                     )
                 )
+                with self._state_lock:
+                    self._refresh_state_from_runtime_locked()
                 return {"ok": True, "result": result}
             finally:
                 with self._state_lock:
@@ -407,6 +426,7 @@ class DaemonRuntime(ProgressSink):
                         released = dict(data.get("released") or {})
             finally:
                 with self._state_lock:
+                    self._refresh_state_from_runtime_locked()
                     self._clear_context_snapshot_locked()
                     self.state["active_request_count"] = max(
                         0,
@@ -414,7 +434,6 @@ class DaemonRuntime(ProgressSink):
                     )
                     self._clear_active_operation_locked()
                     self.state["last_activity_at"] = _utc_now_iso()
-                clear_session_state(self.daemon_context)
                 self._persist_state()
             return {"ok": True, "result": {"released": released, "state": self._snapshot_state()}}
 
@@ -558,7 +577,6 @@ class DaemonRuntime(ProgressSink):
                     self._listener.close()
                 except Exception:
                     pass
-            clear_session_state(self.daemon_context)
             state_path = _daemon_state_path(self.daemon_context)
             try:
                 state_path.unlink(missing_ok=True)

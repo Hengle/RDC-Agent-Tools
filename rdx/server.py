@@ -15,7 +15,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from rdx import server_runtime
 from rdx.core.artifact_publisher import ArtifactPublisher
-from rdx.core.contracts import canonical_error, env_bool
+from rdx.core.contracts import canonical_error
 from rdx.core.engine import CoreEngine, ExecutionContext
 from rdx.daemon.client import daemon_request
 from rdx.progress import ProgressReporter, ProgressSink
@@ -42,24 +42,13 @@ def __getattr__(name: str) -> Any:
     return getattr(server_runtime, name)
 
 
-def _mcp_uses_daemon() -> bool:
-    return env_bool("RDX_MCP_USE_DAEMON", False)
-
-
 def _mcp_daemon_context() -> str:
     return server_runtime._runtime_context_id()
 
 
 @asynccontextmanager
 async def _lifespan(_: FastMCP):
-    if _mcp_uses_daemon():
-        yield
-        return
-    await server_runtime.runtime_startup()
-    try:
-        yield
-    finally:
-        await server_runtime.runtime_shutdown()
+    yield
 
 
 def get_core_engine() -> CoreEngine:
@@ -119,36 +108,32 @@ async def dispatch_operation(
 
 
 async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:
-    if _mcp_uses_daemon():
-        daemon_args = dict(args or {})
-        try:
-            response = daemon_request(
-                "exec",
-                params={
-                    "operation": tool_name,
-                    "args": daemon_args,
-                    "transport": "mcp",
-                    "remote": tool_name.startswith("rd.remote."),
-                },
-                timeout=daemon_exec_timeout_s(tool_name, daemon_args),
-                context=_mcp_daemon_context(),
-            )
-            payload = response.get("result")
-            if isinstance(payload, dict):
-                return json.dumps(payload, ensure_ascii=False, default=server_runtime._json_default)
-            raise RuntimeError("daemon returned invalid MCP payload")
-        except Exception as exc:  # noqa: BLE001
-            payload = canonical_error(
-                result_kind=tool_name,
-                code="runtime_error",
-                category="runtime",
-                message=str(exc),
-                transport="mcp",
-            )
+    daemon_args = dict(args or {})
+    try:
+        response = daemon_request(
+            "exec",
+            params={
+                "operation": tool_name,
+                "args": daemon_args,
+                "transport": "mcp",
+                "remote": tool_name.startswith("rd.remote."),
+            },
+            timeout=daemon_exec_timeout_s(tool_name, daemon_args),
+            context=_mcp_daemon_context(),
+        )
+        payload = response.get("result")
+        if isinstance(payload, dict):
             return json.dumps(payload, ensure_ascii=False, default=server_runtime._json_default)
-
-    payload = await dispatch_operation(tool_name, args, transport="mcp", remote=tool_name.startswith("rd.remote."))
-    return json.dumps(payload, ensure_ascii=False, default=server_runtime._json_default)
+        raise RuntimeError("daemon returned invalid MCP payload")
+    except Exception as exc:  # noqa: BLE001
+        payload = canonical_error(
+            result_kind=tool_name,
+            code="runtime_error",
+            category="runtime",
+            message=str(exc),
+            transport="mcp",
+        )
+        return json.dumps(payload, ensure_ascii=False, default=server_runtime._json_default)
 
 
 def _build_tool_callable(tool_name: str, param_names: Sequence[str]) -> Any:
