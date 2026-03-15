@@ -9,8 +9,9 @@
   - `rdx.bat`
   - `cli/run_cli.py`
   - `mcp/run_mcp.py`
+- `CLI` 与 `MCP` 都是 daemon-backed adapter；当前不再公开 direct runtime 执行模式。
 - `spec/tool_catalog.json` 当前公开 `202` 个规范 `rd.*` tools。
-- `rd.vfs.*` 当前属于 read-only、JSON-first 导航层。
+- `rd.vfs.*` 当前属于 read-only、JSON-first 导航层；其中 tabular projection 只覆盖声明支持的摘要场景。
 
 ## 分发与安装定位
 

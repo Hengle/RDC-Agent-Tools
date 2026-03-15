@@ -29,7 +29,7 @@
 - 长链任务如果没有 context snapshot，模型很容易忘记上一轮 focus 与 artifact 路径。
 - 不是所有底层 RenderDoc `eventId` 都能回灌到 `rd.event.*`；上层必须区分 canonical `event_id` 与 `raw_event_id`。
 - 不要在 replay 仍存活时提前调用 `rd.capture.close_file`；推荐清理顺序是先 `rd.capture.close_replay`，再关闭对应 capture handle。
-- 失败恢复依赖共享契约，调用端需要明确检查 `ok`、`error_message` 与 `error.details`。
+- 失败恢复依赖共享契约，调用端需要明确检查 `ok`、`error.message` 与 `error.details`。
 
 因此，Agent 需要的不只是 catalog，还需要平台使用模型。
 
@@ -53,8 +53,7 @@
 上层 Agent / framework 应遵循这些平台级原则：
 
 - 先根据宿主条件选择入口，再决定具体 tool 序列。
-  - 可直接访问本地进程、文件系统与 daemon 的宿主，默认 local-first，优先使用 `CLI` 或直接本地 runtime。
-  - 需要跨多轮保活 live runtime / context 时，再显式依赖 daemon。
+  - 可直接访问本地进程、文件系统与 daemon 的宿主，默认 local-first，优先使用 daemon-backed `CLI`。
   - 只有宿主不能直达本地环境，或用户明确要求按 `MCP` 接入时，才走 `MCP`。
 - 不论走 `CLI` 还是 `MCP`，任务开始时都应向用户说明当前采用的入口模式。
 - 选择 `MCP` 前，先确认宿主已经配置对应 MCP server。
@@ -80,7 +79,7 @@
 - 优先轻量调用。
   - 先获取事件、状态、元数据，再进入导出、diff、debug 等更重的操作。
 - 失败时先看共享契约。
-- 先检查 `ok` 与 `error_message`。
+- 先检查 `ok` 与 `error.message`。
 - 如果需要归因，再看 `error.details.source_layer`、`classification`、`capture_context`、`renderdoc_status`。
 - 对长耗时操作，优先看 progress/status，而不是把“静默等待”当作失败信号。
 
@@ -100,13 +99,12 @@
 这三者不是同一层概念：
 
 - `CLI`
-  - 本地直接执行入口。
+  - daemon-backed 本地命令入口。
   - 适用于人工、脚本、CI、本地 Agent。
-  - 可以直接执行，也可以通过 `--connect` 复用 daemon。
 - daemon
   - 长生命周期 runtime / context 持有层。
-  - 用于跨命令、跨轮次复用 live session、focus、recent artifacts 与 runtime owner。
-  - 不是 `MCP` 的附属概念；`CLI` 与 `MCP` 都可以依赖同一套 daemon / context 机制。
+  - 是唯一的 live runtime / context owner，用于跨命令、跨轮次复用 live session、focus、recent artifacts 与 runtime owner。
+  - 不是 `MCP` 的附属概念；`CLI` 与 `MCP` 都依赖同一套 daemon / context 机制。
 - `MCP`
   - 协议桥接入口。
   - 适用于无法直接进入本地环境的外部宿主，或用户明确要求按 `MCP` 接入的场景。
@@ -115,7 +113,7 @@
 因此，不应把“是否是 Agent”当成 `CLI` 与 `MCP` 的分界线。真正的分界线是：
 
 - 调用方能否直接进入本地环境。
-- 任务是否需要长期供应 live runtime / context。
+- 调用方应使用哪种 daemon-backed adapter。
 
 ## 7. 建议上层文档说明到什么程度
 

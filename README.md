@@ -1,12 +1,12 @@
 ﻿# `rdx-tools`
 
-`rdx-tools` 是面向 `RenderDoc` 的本地工具集，用于暴露稳定的 `rd.*` tool 能力、管理 `.rdc` 到 replay session 的运行时链路，并为本地直接执行与协议桥接提供统一入口。
+`rdx-tools` 是面向 `RenderDoc` 的本地工具集，用于暴露稳定的 `rd.*` tool 能力、管理 `.rdc` 到 replay session 的运行时链路，并为 daemon-backed 本地入口与协议桥接提供统一入口。
 
 本仓库关注“平台层使用模型”：
 
 - 提供 `CLI`、`MCP`、tool catalog 与 runtime 约束。
 - 说明如何把一份 `.rdc` 变成可操作的 session。
-- 说明 `context`、daemon、session state、artifact、context snapshot 的关系。
+- 说明 `context`、daemon、artifact、context snapshot 的关系。
 
 本仓库**不**提供上层业务 workflow：
 
@@ -46,11 +46,11 @@ rdx.bat --non-interactive mcp --ensure-env
 
 ### `cli/run_cli.py`
 
-本地直接执行入口，适合人工、脚本、CI 和可直接访问本地环境的 Agent。
+daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问本地环境的 Agent。
 
 - 面向“命令”而不是 tool schema。
 - 负责把常见平台动作封装成 `capture open`、`capture status`、`daemon status` 等命令。
-- 可直接在当前进程执行，也可通过 `--connect` 复用 daemon / context。
+- 不拥有独立 runtime；所有业务命令都经当前 context 的 daemon 执行。
 
 ### `mcp/run_mcp.py`
 
@@ -67,13 +67,12 @@ rdx.bat --non-interactive mcp --ensure-env
 选择入口时，按以下顺序判断：
 
 1. 调用方能否直接访问本地进程、文件系统与 daemon。
-2. 如果能，默认 local-first，优先使用 `CLI` 或直接本地 runtime。
-3. 如果任务需要跨多轮保活 live runtime / context，再显式依赖 daemon。
-4. 只有调用方不能直达本地环境，或用户明确要求按 `MCP` 接入时，才使用 `MCP`。
+2. 如果能，默认 local-first，优先使用 daemon-backed `CLI`。
+3. 如果不能直达本地环境，或用户明确要求按 `MCP` 接入时，使用 `MCP`。
 
 补充约束：
 
-- `daemon` 是长生命周期 runtime / context 持有层，不是 `MCP` 的附属概念。
+- `daemon` 是唯一的长生命周期 runtime / context 持有层，不是 `CLI` 或 `MCP` 的附属概念。
 - 不论走 `CLI` 还是 `MCP`，上层 Agent 都应先向用户说明当前采用的入口模式。
 - 如果选择 `MCP`，但宿主没有配置对应 MCP server，必须显式报错或阻断，而不是假设平台能力已经存在。
 
@@ -136,7 +135,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 
 - tool catalog 的权威来源是 `spec/tool_catalog.json`。
 - catalog 当前数量以 `tool_count` 字段为准；当前为 `202`，后续变更必须同步更新 validator、help 输出与文档口径。
-- 运行时响应遵循共享契约；调试时优先检查 `ok`、`error_message`，必要时继续看 `error.details`。
+- 运行时响应遵循共享契约；调试时优先检查 `ok` 与 `error.message`，必要时继续看 `error.details`。
 - 默认参考根目录由 `rdx.bat` 或脚本自身位置推导；`RDX_TOOLS_ROOT` 仅用于覆盖默认值。
 - `rd.event.set_active` 若收到不可解析的 `event_id`，必须失败且保持现有 runtime / context 状态不变。
 - `rd.capture.close_file` 若目标 `capture_file_id` 仍被 live replay 持有，必须失败；推荐顺序是 `rd.capture.close_replay -> rd.capture.close_file`。
