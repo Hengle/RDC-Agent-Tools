@@ -43,8 +43,14 @@ rdx.bat
 ```bat
 rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 rdx capture status
-rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --format json
+rdx call rd.event.get_actions --args-file ".\args.json" --format json
 rdx daemon status
+```
+
+其中 `args.json` 应是 UTF-8 JSON object，例如：
+
+```json
+{"session_id":"<session_id>"}
 ```
 
 你会得到至少这些关键信息：
@@ -54,6 +60,7 @@ rdx daemon status
 - `active_event_id`
 
 其中 `active_event_id` 只会写成可被 `rd.event.get_action_details` round-trip 的 action event。若 `rd.event.set_active` 收到不可解析的 `event_id`，调用会失败，且不会污染当前 context。
+`rdx capture open` 只负责建立当前 context 的 capture/session state，不会创建上层 framework 的 `workspace/case/run`。
 
 若后续要做清理，推荐顺序是先 `rd.capture.close_replay`，再 `rd.capture.close_file`。当 capture 仍被 live replay 持有时，`rd.capture.close_file` 会返回失败而不是静默移除 handle。
 
@@ -139,6 +146,8 @@ python mcp/run_mcp.py --transport streamable-http --host 127.0.0.1 --port 8765 -
 ```bat
 rdx.bat --non-interactive cli --daemon-context smoke daemon status
 ```
+
+当子命令返回 canonical JSON 时，`rdx.bat --non-interactive` 会直接输出完整 payload，适合脚本与自动化读取。
 
 ## 4. `MCP` 最小工具链路
 

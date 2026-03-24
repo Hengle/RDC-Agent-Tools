@@ -51,6 +51,11 @@ rdx.bat --non-interactive mcp --ensure-env
 
 旧的 `cli-shell` / `daemon-shell` alias 已移除；如需直接执行本地命令，请走 `cli` passthrough，或直接调用 `python cli/run_cli.py ...`。
 
+补充说明：
+
+- 如果子命令返回 canonical JSON，launcher 会直接输出完整 payload。
+- 只有 launcher 自身失败，或子命令没有可解析 JSON 时，才会回退到短状态 JSON。
+
 ## 状态面与来源优先级是什么
 
 排查问题时，请先区分四类状态面：
@@ -169,10 +174,19 @@ python cli/run_cli.py daemon status --daemon-context smoke
 rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --json --connect
 ```
 
-如果你在 PowerShell 里直接调用 `python cli/run_cli.py ...`，需要根据 PowerShell 的转义规则重新组织 JSON 字符串。优先建议：
+如果你在 PowerShell 里直接调用 `python cli/run_cli.py ...`，需要根据 PowerShell 的转义规则重新组织 JSON 字符串。当前更稳定的跨 shell 入口是 `--args-file`。优先建议：
 
 - 先使用 `rdx.bat` 的 `Start CLI`
-- 或把复杂 JSON 放入脚本变量后再传参
+- 或把 JSON 写入 UTF-8 文件后，通过 `--args-file <path>` 传参
+- 只有在 shell quoting 明确可控时，才继续使用 `--args-json`
+
+例如：
+
+```powershell
+$argsFile = Join-Path $PWD "args.json"
+Set-Content -LiteralPath $argsFile -Encoding utf8 -Value '{"session_id":"<session_id>"}'
+python cli/run_cli.py call rd.session.get_context --args-file $argsFile --format json
+```
 
 ## `remote_handle_consumed` 是什么
 
@@ -249,7 +263,7 @@ rdx call rd.session.get_context --json --connect
 如果需要补充用户视角焦点，而不是改 runtime 自身状态，再用：
 
 ```bat
-rdx call rd.session.update_context --args-json "{\"key\":\"focus_pixel\",\"value\":\"512,384\"}" --json --connect
+rdx call rd.session.update_context --args-file ".\context-update.json" --json --connect
 ```
 
 ## shell 异常关闭后会不会留下 daemon

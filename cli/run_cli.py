@@ -90,7 +90,7 @@ def _print_launcher_help() -> None:
     print("commands:")
     print("  daemon start|stop|status")
     print("  context clear")
-    print("  call <operation> [--args-json ...] [--format json|tsv] [--remote]")
+    print("  call <operation> [--args-json ... | --args-file ...] [--format json|tsv] [--remote]")
     print("  capture open|status")
     print("  vfs ls|cat|tree|resolve")
     print("  diff pipeline|image")
@@ -100,6 +100,7 @@ def _print_launcher_help() -> None:
     print("  python cli/run_cli.py daemon start --daemon-context local")
     print("  python cli/run_cli.py context clear --daemon-context local")
     print("  python cli/run_cli.py capture open --file D:\\path\\capture.rdc --frame-index 0")
+    print("  python cli/run_cli.py call rd.session.get_context --args-file .\\args.json --format json")
     print("  python cli/run_cli.py vfs ls --path / --format tsv")
 
 

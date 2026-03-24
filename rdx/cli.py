@@ -36,13 +36,37 @@ def _print_json(payload: Dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def _parse_args_json(raw: str) -> Dict[str, Any]:
-    if not raw.strip():
-        return {}
+def _parse_json_object(raw: str, *, source: str) -> Dict[str, Any]:
     parsed = json.loads(raw)
     if not isinstance(parsed, dict):
-        raise ValueError("--args-json must be a JSON object")
+        raise ValueError(f"{source} must be a JSON object")
     return parsed
+
+
+def _load_call_args(*, args_json: Optional[str] = None, args_file: Optional[str] = None) -> Dict[str, Any]:
+    raw_json = str(args_json or "")
+    raw_file = str(args_file or "").strip()
+    has_json = bool(raw_json.strip())
+    has_file = bool(raw_file)
+
+    if has_json and has_file:
+        raise ValueError("--args-json and --args-file are mutually exclusive")
+    if has_file:
+        path = Path(raw_file).expanduser()
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"--args-file could not be read: {path}") from exc
+        try:
+            return _parse_json_object(raw, source="--args-file")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"--args-file contains invalid JSON: {exc.msg}") from exc
+    if has_json:
+        try:
+            return _parse_json_object(raw_json, source="--args-json")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"--args-json contains invalid JSON: {exc.msg}") from exc
+    return {}
 
 
 def _extract(payload: Dict[str, Any], key: str, default: Any = None) -> Any:
@@ -191,7 +215,13 @@ def _render_result(payload: Dict[str, Any], *, output_format: str = "json") -> N
 
 
 async def _cmd_call(args: argparse.Namespace) -> int:
-    call_args = _tabular_request(str(args.format), _parse_args_json(args.args_json or "{}"))
+    call_args = _tabular_request(
+        str(args.format),
+        _load_call_args(
+            args_json=getattr(args, "args_json", None),
+            args_file=getattr(args, "args_file", None),
+        ),
+    )
     payload = _daemon_exec(args.operation, call_args, remote=bool(args.remote), context=str(args.daemon_context))
     _render_result(payload, output_format=str(args.format))
     return EXIT_OK if bool(payload.get("ok")) else EXIT_RUNTIME_ERR
@@ -418,7 +448,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_call = sub.add_parser("call", help="Call any rd.* operation")
     p_call.add_argument("operation")
-    p_call.add_argument("--args-json", default="{}")
+    p_call_args = p_call.add_mutually_exclusive_group()
+    p_call_args.add_argument("--args-json", default=None)
+    p_call_args.add_argument("--args-file", default=None)
     p_call.add_argument("--format", choices=("json", "tsv"), default="json")
     p_call.add_argument("--remote", action="store_true")
 

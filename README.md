@@ -46,6 +46,7 @@
 - tool 能力面与参数语义，以 catalog 和共享契约为准。
 - runtime 行为是平台真相的运行时体现。
 - `CLI` 只是 convenience wrapper，不是完整能力面的等价镜像，也不是规范源。
+- `capture open` 只负责建立 tools-layer session state，不会初始化上层 framework 的 `workspace/case/run`。
 - 规范定义以 `spec/tool_catalog.json` 为准。
 
 ## 入口概览
@@ -63,6 +64,8 @@ rdx.bat --non-interactive cli --help
 rdx.bat --non-interactive mcp --ensure-env
 ```
 
+`--non-interactive` 下如果子命令返回 canonical JSON，launcher 会直接透传完整 payload；只有 launcher 自身失败或子命令没有 JSON 时，才回退到短状态 JSON。
+
 ### `cli/run_cli.py`
 
 daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问本地环境的 Agent。
@@ -70,6 +73,7 @@ daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问
 - 面向“命令”而不是 tool schema。
 - 负责把常见平台动作封装成 `capture open`、`capture status`、`daemon status` 等命令。
 - 不拥有独立 runtime；所有业务命令都经当前 context 的 daemon 执行。
+- `call` 同时支持 `--args-json` 与 `--args-file`；跨 shell 自动化优先使用 `--args-file`。
 
 ### `mcp/run_mcp.py`
 
@@ -102,6 +106,7 @@ daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问
 
 ```bat
 python cli/run_cli.py capture open --file "C:\path\capture.rdc" --frame-index 0
+python cli/run_cli.py call rd.session.get_context --args-file ".\args.json" --format json
 python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 ```
 

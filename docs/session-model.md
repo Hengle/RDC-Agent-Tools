@@ -105,6 +105,11 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 
 因此，`CLI` 是 daemon-backed 本地命令入口，可供人工、脚本、CI 与本地 Agent 复用；`MCP` 则把同样的底层动作以协议桥接的方式暴露给外部宿主。两者都不拥有独立 runtime；`CLI` 不是规范源，而是平台动作的 convenience wrapper。
 
+额外约束：
+
+- `capture open` 只建立 tools-layer session state，不创建任何 framework `workspace/case/run`。
+- `workspace/case/run` 是否创建，属于上层 framework intake / orchestration 合同，不属于 `rdx-tools` 平台契约。
+
 ## 4. 状态面与来源优先级
 
 `rdx-tools` 至少存在四类彼此相关但不等价的状态面：
@@ -197,6 +202,7 @@ artifact 不是 session 本身，但经常与 session 联动：
 - `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay` 表示 remote 入口的推荐顺序。
 - 除非显式声明支持并发，否则不应把并发观测结果视为平台定义。
 - “已验证”必须绑定具体入口和执行方式，例如 `python cli/run_cli.py ...` 的顺序调用，或 `rdx.bat` 交互 shell 中的顺序调用。
+- `rdx.bat --non-interactive` 在子命令返回 canonical JSON 时会直接透传完整 payload；自动化脚本应按完整 payload 读取，而不是依赖旧的短状态壳。
 
 ## 9. 平台职责与上层职责
 

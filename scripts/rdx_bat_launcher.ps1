@@ -209,7 +209,7 @@ function Invoke-Subprocess {
     }
 }
 
-function Extract-JsonPayload {
+function Extract-JsonText {
     param([string]$Text)
 
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
@@ -217,7 +217,14 @@ function Extract-JsonPayload {
     if ($start -lt 0) { return $null }
     $end = $Text.LastIndexOf('}')
     if ($end -le $start) { return $null }
-    $candidate = $Text.Substring($start, $end - $start + 1)
+    return $Text.Substring($start, $end - $start + 1)
+}
+
+function Extract-JsonPayload {
+    param([string]$Text)
+
+    $candidate = Extract-JsonText $Text
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return $null }
     try {
         return $candidate | ConvertFrom-Json -ErrorAction Stop
     }
@@ -303,18 +310,10 @@ function Emit-ChildResult {
         return $ExitCode
     }
 
+    $jsonText = Extract-JsonText ($Output + "`n" + $Error)
     $payload = Extract-JsonPayload ($Output + "`n" + $Error)
     if ($payload -and $payload.PSObject.Properties.Name -contains 'ok') {
-        if (-not ($payload.PSObject.Properties.Name -contains 'context_id')) {
-            $payload | Add-Member -NotePropertyName context_id -NotePropertyValue $ContextId -Force
-        }
-        $status = [ordered]@{
-            ok = [bool]$payload.ok
-            error_code = if ($payload.PSObject.Properties.Name -contains 'error_code') { try { [int]$payload.error_code } catch { 5 } } else { 5 }
-            error_message = if ($payload.PSObject.Properties.Name -contains 'error_message') { [string]$payload.error_message } else { '' }
-            context_id = [string]$payload.context_id
-        }
-        Write-Output ($status | ConvertTo-Json -Depth 8 -Compress)
+        if ($jsonText) { Write-Output $jsonText.Trim() }
         return Map-ExitCode -ChildExitCode $ExitCode -TimedOut $TimedOut -Payload $payload
     }
 
@@ -503,6 +502,7 @@ function Write-HelpPage {
     Write-Host '  rdx capture open --file <capture.rdc> --frame-index 0'
     Write-Host '  rdx capture status'
     Write-Host '  rdx call rd.event.get_actions --args-json <json> --format json'
+    Write-Host '  rdx call rd.session.get_context --args-file <path> --format json'
     Write-Host '  rdx vfs ls --path / --format tsv'
     Write-Host '  rdx.bat --non-interactive cli daemon status'
     Write-Host '  rdx daemon status'
