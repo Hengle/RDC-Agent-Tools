@@ -29,6 +29,8 @@ REQUIRED_DIRS = [
     "tests",
     "binaries/windows/x64/pymodules",
     "intermediate/runtime/rdx_cli",
+    "intermediate/runtime/worker-cache",
+    "intermediate/runtime/worker-state",
     "intermediate/artifacts",
     "intermediate/pytest",
     "intermediate/logs",

@@ -152,8 +152,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         ensure_daemon,
         heartbeat_client,
     )
+    from rdx.runtime_materializer import load_runtime_source
     from rdx.runtime_paths import ensure_runtime_dirs, ensure_tools_root_env
-    from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 
     try:
         root = ensure_tools_root_env()
@@ -171,11 +171,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         sys.path.insert(0, str(root))
 
     ensure_runtime_dirs()
-    bootstrap = bootstrap_renderdoc_runtime(probe_import=True)
+    try:
+        runtime_source = load_runtime_source()
+    except Exception as exc:  # noqa: BLE001
+        _emit_runtime_env_error("runtime_layout_missing", str(exc), context_id=context_id)
+        return RETURN_ENV_ERROR
 
     if parsed.ensure_env:
         missing = _check_deps()
-        ok_layout, layout_errors = _check_runtime_layout(bootstrap.binaries_dir, bootstrap.pymodules_dir)
+        ok_layout, layout_errors = _check_runtime_layout(runtime_source.binaries_dir, runtime_source.pymodules_dir)
 
         if missing:
             _emit_runtime_env_error(
@@ -193,14 +197,6 @@ def main(argv: Iterable[str] | None = None) -> int:
             )
             return RETURN_ENV_ERROR
 
-        if not bootstrap.import_ok:
-            _emit_runtime_env_error(
-                "renderdoc_import_failed",
-                f"{bootstrap.import_module_path or 'renderdoc import failed'}: {bootstrap.import_error}",
-                context_id=context_id,
-            )
-            return RETURN_ENV_ERROR
-
         _emit_payload(
             {
                 "ok": True,
@@ -210,8 +206,9 @@ def main(argv: Iterable[str] | None = None) -> int:
                 "details": {
                     "layout_ok": True,
                     "tools_root": str(root),
-                    "renderdoc_dll": str(bootstrap.binaries_dir / "renderdoc.dll"),
-                    "renderdoc_pyd": str(bootstrap.pymodules_dir / "renderdoc.pyd"),
+                    "source_manifest": str(runtime_source.manifest_path),
+                    "renderdoc_dll": str(runtime_source.binaries_dir / "renderdoc.dll"),
+                    "renderdoc_pyd": str(runtime_source.pymodules_dir / "renderdoc.pyd"),
                 },
             }
         )
@@ -223,7 +220,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         _emit_runtime_env_error("dependencies_missing", "missing python dependencies", context_id=context_id)
         return RETURN_ARGS_ERROR
 
-    ok_layout, layout_errors = _check_runtime_layout(bootstrap.binaries_dir, bootstrap.pymodules_dir)
+    ok_layout, layout_errors = _check_runtime_layout(runtime_source.binaries_dir, runtime_source.pymodules_dir)
     if not ok_layout:
         for item in layout_errors:
             print(f"[RDX] {item}", file=sys.stderr)

@@ -85,6 +85,8 @@ def test_required_directories_exist() -> None:
         ROOT / "tests",
         ROOT / "binaries" / "windows" / "x64" / "pymodules",
         ROOT / "intermediate" / "runtime" / "rdx_cli",
+        ROOT / "intermediate" / "runtime" / "worker-cache",
+        ROOT / "intermediate" / "runtime" / "worker-state",
         ROOT / "intermediate" / "artifacts",
         ROOT / "intermediate" / "pytest",
         ROOT / "intermediate" / "logs",

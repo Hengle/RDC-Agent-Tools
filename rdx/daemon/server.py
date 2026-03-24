@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import ctypes
-import json
 import logging
 import os
 import signal
@@ -16,17 +14,17 @@ from multiprocessing.connection import Listener
 from pathlib import Path
 from typing import Any, Dict
 
-from rdx import server_runtime
+from rdx.context_snapshot import clear_context_snapshot
 from rdx.daemon.client import (
     DEFAULT_IDLE_TIMEOUT_S,
     DEFAULT_LEASE_TIMEOUT_S,
     save_daemon_state,
 )
+from rdx.daemon.worker import RuntimeWorkerProcess
 from rdx.progress import ProgressEvent, ProgressSink
-from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 from rdx.runtime_paths import cli_runtime_dir
-from rdx.runtime_state import load_context_state
-from rdx.server import dispatch_operation, runtime_shutdown, runtime_startup
+from rdx.runtime_state import clear_context_state, load_context_state
+from rdx.runtime_worker_state import load_worker_state
 
 logger = logging.getLogger("rdx.daemon")
 
@@ -147,11 +145,19 @@ class DaemonRuntime(ProgressSink):
             "session_count": 0,
             "capture_count": 0,
             "recovery_status": "idle",
+            "worker": {
+                "running": False,
+                "pid": 0,
+                "runtime_id": "",
+                "cache_root": "",
+                "source_manifest": "",
+            },
         }
         self._listener = None
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
         self._exec_lock = threading.Lock()
+        self._worker: RuntimeWorkerProcess | None = None
 
     def _auth(self, request: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
         if str(request.get("token", "")) != self.token:
@@ -203,8 +209,10 @@ class DaemonRuntime(ProgressSink):
     def _snapshot_state(self) -> Dict[str, Any]:
         with self._state_lock:
             self._prune_clients_locked(_now_ms())
+            self._refresh_state_from_runtime_locked()
             payload = dict(self.state)
             payload["attached_clients"] = [dict(item) for item in payload.get("attached_clients", [])]
+            payload["worker"] = dict(payload.get("worker") or {})
         return payload
 
     def _status_payload(self) -> Dict[str, Any]:
@@ -213,6 +221,8 @@ class DaemonRuntime(ProgressSink):
         return {"ok": True, "result": {"running": self.running, "state": state}}
 
     def _stop(self) -> None:
+        if self._worker is not None:
+            self._worker.stop()
         self.running = False
         self._stop_event.set()
         if self._listener is not None:
@@ -227,6 +237,9 @@ class DaemonRuntime(ProgressSink):
         self.state["capture_path"] = ""
         self.state["active_event_id"] = 0
         self.state["frame_index"] = 0
+        self.state["session_count"] = 0
+        self.state["capture_count"] = 0
+        self.state["recovery_status"] = "idle"
         self.state["active_operation"] = {}
 
     def _set_active_operation_locked(
@@ -287,26 +300,63 @@ class DaemonRuntime(ProgressSink):
             else:
                 self.state[key] = str(value or "")
 
+    def _worker_snapshot_locked(self) -> Dict[str, Any]:
+        if self._worker is not None:
+            worker = dict(self._worker.snapshot())
+        else:
+            worker = dict(load_worker_state(self.daemon_context) or {})
+            pid = int(worker.get("pid") or 0)
+            worker["running"] = bool(worker.get("running")) and _is_process_running(pid)
+            if not worker["running"]:
+                worker["pid"] = 0
+        return {
+            "running": bool(worker.get("running")),
+            "pid": int(worker.get("pid") or 0),
+            "runtime_id": str(worker.get("runtime_id") or ""),
+            "cache_root": str(worker.get("cache_root") or ""),
+            "source_manifest": str(worker.get("source_manifest") or ""),
+        }
+
     def _refresh_state_from_runtime_locked(self) -> None:
-        snapshot = server_runtime._context_snapshot(self.daemon_context)
-        runtime_payload = snapshot.get("runtime", {}) if isinstance(snapshot, dict) else {}
-        if not isinstance(runtime_payload, dict):
-            runtime_payload = {}
         context_state = load_context_state(self.daemon_context)
-        capture_file_id = str(runtime_payload.get("capture_file_id") or "")
-        capture_path = ""
-        if capture_file_id:
-            handle = server_runtime._runtime.captures.get(capture_file_id)
-            if handle is not None:
-                capture_path = str(handle.file_path or "")
-        self.state["session_id"] = str(runtime_payload.get("session_id") or context_state.get("current_session_id") or "")
-        self.state["capture_file_id"] = capture_file_id or str(context_state.get("current_capture_file_id") or "")
-        self.state["capture_path"] = capture_path
-        self.state["active_event_id"] = int(runtime_payload.get("active_event_id") or 0)
-        self.state["frame_index"] = int(runtime_payload.get("frame_index") or 0)
+        sessions = context_state.get("sessions", {}) if isinstance(context_state.get("sessions"), dict) else {}
+        captures = context_state.get("captures", {}) if isinstance(context_state.get("captures"), dict) else {}
+        current_session_id = str(context_state.get("current_session_id") or "")
+        current_capture_file_id = str(context_state.get("current_capture_file_id") or "")
+        current_session = sessions.get(current_session_id) if current_session_id else {}
+        current_capture = captures.get(current_capture_file_id) if current_capture_file_id else {}
+
+        self.state["session_id"] = current_session_id
+        self.state["capture_file_id"] = current_capture_file_id
+        self.state["capture_path"] = str(
+            (current_capture or {}).get("file_path")
+            or (current_session or {}).get("rdc_path")
+            or ""
+        )
+        self.state["active_event_id"] = int((current_session or {}).get("active_event_id") or 0)
+        self.state["frame_index"] = int((current_session or {}).get("frame_index") or 0)
         self.state["session_count"] = len(context_state.get("sessions", {}))
         self.state["capture_count"] = len(context_state.get("captures", {}))
         self.state["recovery_status"] = str((context_state.get("recovery") or {}).get("status") or "idle")
+        self.state["worker"] = self._worker_snapshot_locked()
+
+    def _ensure_worker(self) -> RuntimeWorkerProcess:
+        if self._worker is None:
+            self._worker = RuntimeWorkerProcess(context_id=self.daemon_context)
+        self._worker.ensure_started()
+        return self._worker
+
+    def _request_worker(self, method: str, params: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        worker = self._ensure_worker()
+        try:
+            response = worker.request(method, params, timeout=timeout)
+        except Exception:
+            worker.stop()
+            response = worker.request(method, params, timeout=timeout)
+        if not bool(response.get("ok")):
+            error = response.get("error") if isinstance(response.get("error"), dict) else {}
+            raise RuntimeError(str(error.get("message") or f"worker {method} failed"))
+        return dict(response)
 
     def _handle_attach_client(self, params: Dict[str, Any]) -> Dict[str, Any]:
         client_id = str(params.get("client_id") or "").strip()
@@ -382,19 +432,24 @@ class DaemonRuntime(ProgressSink):
                 )
             self._persist_state()
             try:
-                result = asyncio.run(
-                    dispatch_operation(
-                        operation,
-                        args,
-                        transport=transport,
-                        remote=remote,
-                        context_id=self.daemon_context,
-                        progress_sink=self,
-                    )
+                response = self._request_worker(
+                    "exec",
+                    {
+                        "operation": operation,
+                        "args": dict(args or {}),
+                        "transport": transport,
+                        "remote": remote,
+                        "context_id": self.daemon_context,
+                    },
                 )
+                result = response.get("result")
                 with self._state_lock:
                     self._refresh_state_from_runtime_locked()
                 return {"ok": True, "result": result}
+            except Exception as exc:
+                with self._state_lock:
+                    self._refresh_state_from_runtime_locked()
+                return {"ok": False, "error": {"code": "worker_error", "message": str(exc)}}
             finally:
                 with self._state_lock:
                     self.state["active_request_count"] = max(
@@ -418,20 +473,18 @@ class DaemonRuntime(ProgressSink):
             self._persist_state()
             released: Dict[str, Any] = {}
             try:
-                result = asyncio.run(
-                    dispatch_operation(
-                        "rd.core.shutdown",
-                        {},
-                        transport="daemon",
-                        remote=False,
-                        context_id=self.daemon_context,
-                        progress_sink=self,
-                    )
-                )
-                if isinstance(result, dict):
-                    data = result.get("data")
-                    if isinstance(data, dict):
-                        released = dict(data.get("released") or {})
+                if self._worker is not None and self._worker.is_running():
+                    response = self._request_worker("clear_context", {"context_id": self.daemon_context}, timeout=15.0)
+                    result = response.get("result")
+                    if isinstance(result, dict):
+                        data = result.get("data")
+                        if isinstance(data, dict):
+                            released = dict(data.get("released") or {})
+                else:
+                    clear_context_snapshot(self.daemon_context)
+                    clear_context_state(self.daemon_context)
+            except Exception as exc:
+                return {"ok": False, "error": {"code": "worker_error", "message": str(exc)}}
             finally:
                 with self._state_lock:
                     self._refresh_state_from_runtime_locked()
@@ -609,11 +662,6 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    bootstrap = bootstrap_renderdoc_runtime(probe_import=False)
-    logger.info("runtime bootstrap dll_dir=%s pymodules=%s", bootstrap.binaries_dir, bootstrap.pymodules_dir)
-    for item in bootstrap.dll_dir_errors:
-        logger.warning("runtime bootstrap warning: %s", item)
-
     daemon = DaemonRuntime(
         pipe_name=str(args.pipe_name),
         token=str(args.token),
@@ -628,13 +676,7 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
-
-    asyncio.run(runtime_startup())
-    asyncio.run(server_runtime.ensure_context_ready(str(args.daemon_context)))
-    try:
-        raise SystemExit(daemon.serve_forever())
-    finally:
-        asyncio.run(runtime_shutdown())
+    raise SystemExit(daemon.serve_forever())
 
 
 if __name__ == "__main__":

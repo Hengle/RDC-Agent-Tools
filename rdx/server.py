@@ -1,4 +1,4 @@
-"""RDX MCP server entrypoint backed by the catalog router and namespace handlers."""
+"""RDX server helpers and daemon-backed MCP entrypoint."""
 
 from __future__ import annotations
 
@@ -13,38 +13,45 @@ from typing import Any, Dict, Optional, Sequence
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from rdx import server_runtime
 from rdx.core.artifact_publisher import ArtifactPublisher
 from rdx.core.contracts import canonical_error
 from rdx.core.errors import map_exception
 from rdx.core.engine import CoreEngine, ExecutionContext
 from rdx.daemon.client import daemon_request
 from rdx.progress import ProgressReporter, ProgressSink
+from rdx.runtime_catalog import load_tool_catalog
 from rdx.timeout_policy import daemon_exec_timeout_s
-from rdx.tool_router import build_operation_registry, load_catalog
+ 
+_CATALOG_TOOLS = load_tool_catalog()
+_core_engine: Optional[CoreEngine] = None
 
-CaptureFileHandle = server_runtime.CaptureFileHandle
-ReplayHandle = server_runtime.ReplayHandle
-RemoteHandle = server_runtime.RemoteHandle
-ConsumedRemoteHandle = server_runtime.ConsumedRemoteHandle
-ShaderDebugHandle = server_runtime.ShaderDebugHandle
-RuntimeState = server_runtime.RuntimeState
 
-_runtime = server_runtime._runtime
-_CATALOG_TOOLS = load_catalog()
-_operation_registry = build_operation_registry()
-_core_engine = CoreEngine(
-    registry=_operation_registry,
-    artifact_publisher=ArtifactPublisher(),
-)
+def _runtime_module() -> Any:
+    from rdx import server_runtime
+
+    return server_runtime
 
 
 def __getattr__(name: str) -> Any:
-    return getattr(server_runtime, name)
+    if name == "server_runtime":
+        return _runtime_module()
+    return getattr(_runtime_module(), name)
+
+
+def _get_core_engine() -> CoreEngine:
+    global _core_engine
+    if _core_engine is None:
+        from rdx.tool_router import build_operation_registry
+
+        _core_engine = CoreEngine(
+            registry=build_operation_registry(),
+            artifact_publisher=ArtifactPublisher(),
+        )
+    return _core_engine
 
 
 def _mcp_daemon_context() -> str:
-    return server_runtime._runtime_context_id()
+    return str(os.environ.get("RDX_CONTEXT_ID") or "default").strip() or "default"
 
 
 @asynccontextmanager
@@ -53,7 +60,15 @@ async def _lifespan(_: FastMCP):
 
 
 def get_core_engine() -> CoreEngine:
-    return _core_engine
+    return _get_core_engine()
+
+
+async def runtime_startup() -> None:
+    await _runtime_module().runtime_startup()
+
+
+async def runtime_shutdown() -> None:
+    await _runtime_module().runtime_shutdown()
 
 
 async def dispatch_operation(
@@ -65,6 +80,7 @@ async def dispatch_operation(
     context_id: Optional[str] = None,
     progress_sink: Optional[ProgressSink] = None,
 ) -> Dict[str, Any]:
+    server_runtime = _runtime_module()
     await server_runtime.runtime_startup()
     call_args = dict(args or {})
     chosen_context_id = server_runtime.normalize_context_id(context_id or server_runtime._runtime_context_id())
@@ -99,7 +115,7 @@ async def dispatch_operation(
         )
         try:
             await server_runtime.ensure_context_ready(chosen_context_id)
-            payload = await _core_engine.execute(operation, call_args, context=ctx)
+            payload = await _get_core_engine().execute(operation, call_args, context=ctx)
             if isinstance(payload, dict):
                 server_runtime._postprocess_context_snapshot(operation, call_args, payload, ctx)
         except Exception as exc:  # noqa: BLE001
@@ -149,7 +165,7 @@ async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:
         )
         payload = response.get("result")
         if isinstance(payload, dict):
-            return json.dumps(payload, ensure_ascii=False, default=server_runtime._json_default)
+            return json.dumps(payload, ensure_ascii=False, default=str)
         raise RuntimeError("daemon returned invalid MCP payload")
     except Exception as exc:  # noqa: BLE001
         payload = canonical_error(
@@ -159,7 +175,7 @@ async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:
             message=str(exc),
             transport="mcp",
         )
-        return json.dumps(payload, ensure_ascii=False, default=server_runtime._json_default)
+        return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def _build_tool_callable(tool_name: str, param_names: Sequence[str]) -> Any:

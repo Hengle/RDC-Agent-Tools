@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 from rdx.context_snapshot import clear_context_snapshot
 from rdx.runtime_state import clear_context_state
 from rdx.runtime_paths import cli_runtime_dir
+from rdx.runtime_worker_state import clear_worker_state
 
 STATE_DIR = cli_runtime_dir()
 DAEMON_STATE_FILE = STATE_DIR / "daemon_state.json"
@@ -201,6 +202,14 @@ def _normalize_daemon_state_payload(payload: Dict[str, Any], context: Optional[s
     state["session_count"] = int(payload.get("session_count") or 0)
     state["capture_count"] = int(payload.get("capture_count") or 0)
     state["recovery_status"] = str(payload.get("recovery_status") or "").strip()
+    worker = payload.get("worker")
+    state["worker"] = dict(worker) if isinstance(worker, dict) else {
+        "running": False,
+        "pid": 0,
+        "runtime_id": "",
+        "cache_root": "",
+        "source_manifest": "",
+    }
     return state
 
 
@@ -425,6 +434,8 @@ def cleanup_stale_daemon_states(context: Optional[str] = None) -> Dict[str, list
             continue
         state = _normalize_daemon_state_payload(raw, ctx) if raw else {}
         pid = int(state.get("pid") or 0)
+        worker = state.get("worker") if isinstance(state.get("worker"), dict) else {}
+        worker_pid = int(worker.get("pid") or 0)
 
         if _state_should_reap(state):
             if pid > 0 and _is_process_running(pid):
@@ -436,8 +447,13 @@ def cleanup_stale_daemon_states(context: Optional[str] = None) -> Dict[str, list
                     if _kill_process(pid):
                         cleaned["killed_pids"].append(str(pid))
                         _wait_for_pid_exit(pid, 3.0)
+            if worker_pid > 0 and _is_process_running(worker_pid):
+                if _kill_process(worker_pid):
+                    cleaned["killed_pids"].append(str(worker_pid))
+                    _wait_for_pid_exit(worker_pid, 3.0)
             clear_daemon_state(ctx)
             clear_session_state(ctx)
+            clear_worker_state(ctx)
             cleaned["state_files"].append(path.name)
             cleaned["session_files"].append(_session_state_path(ctx).name)
     return cleaned
@@ -663,6 +679,7 @@ def clear_context(context: Optional[str] = "default") -> Tuple[bool, str, Dict[s
         clear_session_state(context=chosen_ctx)
         clear_context_snapshot(context=chosen_ctx)
         clear_context_state(context=chosen_ctx)
+        clear_worker_state(context=chosen_ctx)
         return True, "context cleared (no active daemon)", {"released": {}, "state": {}}
 
     try:
@@ -675,6 +692,7 @@ def clear_context(context: Optional[str] = "default") -> Tuple[bool, str, Dict[s
         clear_session_state(context=chosen_ctx)
         clear_context_snapshot(context=chosen_ctx)
         clear_context_state(context=chosen_ctx)
+        clear_worker_state(context=chosen_ctx)
         return True, "context cleared (no active daemon)", {"released": {}, "state": {}}
     if not bool(response.get("ok")):
         err = response.get("error") if isinstance(response.get("error"), dict) else {}
@@ -699,6 +717,7 @@ def stop_daemon(context: Optional[str] = "default") -> Tuple[bool, str]:
     if not st:
         clear_daemon_state(context=chosen_ctx)
         clear_session_state(context=chosen_ctx)
+        clear_worker_state(context=chosen_ctx)
         return False, "no active daemon"
 
     pid = int(st.get("pid") or 0)
@@ -709,4 +728,5 @@ def stop_daemon(context: Optional[str] = "default") -> Tuple[bool, str]:
 
     clear_daemon_state(context=chosen_ctx)
     clear_session_state(context=chosen_ctx)
+    clear_worker_state(context=chosen_ctx)
     return True, "daemon stopped"
