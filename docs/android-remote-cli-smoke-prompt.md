@@ -152,6 +152,7 @@
 - 目标：对 `spec/tool_catalog.json` 中当前全部 `rd.*` tools 做覆盖检查，不能只停留在最短链路。
 - 可以运行补充脚本，例如：
   - `python scripts/tool_contract_check.py --local-rdc "<local_sample>" --remote-rdc "<remote_sample_or同一文件>" --transport <mcp|daemon|both> --artifact-dir "<artifact_dir>" --out-json "<out_json>" --out-md "<out_md>" --daemon-context-prefix "<context_prefix>"`
+  - 如果这轮目标就是 Android remote-only 全量 smoke，可直接运行 `python scripts/tool_contract_remote_smoke.py --rdc "<remote_sample_or同一文件>" --transport <mcp|daemon|both> --artifact-dir "<artifact_dir>" --out-json "<out_json>" --out-md "<out_md>" --daemon-context-prefix "<context_prefix>"`
 - 如果这条脚本用于 Android remote matrix，当前默认会把 remote branch 对齐到 `rd.remote.connect(options.transport="adb_android")`。
 - 如需覆盖 remote 连接细节，可通过环境变量提供：`RDX_REMOTE_CONNECT_TRANSPORT`、`RDX_REMOTE_DEVICE_SERIAL`、`RDX_REMOTE_LOCAL_PORT`、`RDX_REMOTE_INSTALL_APK`、`RDX_REMOTE_PUSH_CONFIG`。
 - 如需补充命令层证据，可额外运行 `python scripts/rdx_bat_command_smoke.py`。

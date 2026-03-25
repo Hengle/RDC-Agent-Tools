@@ -25,6 +25,7 @@ from rdx.progress import ProgressEvent, ProgressSink
 from rdx.runtime_paths import cli_runtime_dir
 from rdx.runtime_state import clear_context_state, load_context_state
 from rdx.runtime_worker_state import load_worker_state
+from rdx.timeout_policy import worker_exec_timeout_s
 
 logger = logging.getLogger("rdx.daemon")
 
@@ -432,6 +433,7 @@ class DaemonRuntime(ProgressSink):
                 )
             self._persist_state()
             try:
+                worker_timeout_s = worker_exec_timeout_s(operation, args)
                 response = self._request_worker(
                     "exec",
                     {
@@ -441,6 +443,7 @@ class DaemonRuntime(ProgressSink):
                         "remote": remote,
                         "context_id": self.daemon_context,
                     },
+                    timeout=worker_timeout_s,
                 )
                 result = response.get("result")
                 with self._state_lock:

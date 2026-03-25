@@ -6909,6 +6909,41 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         return _ok(explanation=explanation, history=history[:20])
 
     if action == "resource_dependency_graph":
+        event_range = _as_dict(args.get("event_range"), default={})
+        start_evt = _as_int(event_range.get("start_event_id"), 0)
+        end_evt = _as_int(event_range.get("end_event_id"), 0)
+        max_nodes = max(1, _as_int(args.get("max_nodes"), 128))
+        max_edges = max(0, _as_int(args.get("max_edges"), 256))
+
+        if start_evt > 0 and end_evt >= start_evt:
+            graph = {"nodes": [], "edges": []}
+            previous_node_id = None
+            for evt in range(start_evt, end_evt + 1):
+                if len(graph["nodes"]) >= max_nodes:
+                    break
+                detail_resp = await _dispatch_event(
+                    "get_action_details",
+                    {"session_id": session_id, "event_id": evt},
+                )
+                detail_payload = json.loads(detail_resp)
+                if not detail_payload.get("success"):
+                    if evt == start_evt and not graph["nodes"]:
+                        return detail_resp
+                    continue
+                action_payload = _as_dict(detail_payload.get("action"), default={})
+                node_id = f"evt_{evt}"
+                graph["nodes"].append(
+                    {
+                        "id": node_id,
+                        "label": str(action_payload.get("name") or f"Event {evt}"),
+                        "event_id": int(evt),
+                    }
+                )
+                if previous_node_id is not None and len(graph["edges"]) < max_edges:
+                    graph["edges"].append({"from": previous_node_id, "to": node_id})
+                previous_node_id = node_id
+            return _ok(graph=graph)
+
         event_tree_resp = await _dispatch_event("get_action_tree", {"session_id": session_id, "max_depth": 4})
         payload = json.loads(event_tree_resp)
         if not payload.get("success"):
@@ -6923,9 +6958,10 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
                 graph["nodes"].append({"id": f"evt_{event_id}", "label": node.get("name", "")})
             for child in node.get("children", []):
                 cid = child.get("event_id")
-                if event_id is not None and cid is not None:
+                if event_id is not None and cid is not None and len(graph["edges"]) < max_edges:
                     graph["edges"].append({"from": f"evt_{event_id}", "to": f"evt_{cid}"})
-                queue.append(child)
+                if len(graph["nodes"]) < max_nodes:
+                    queue.append(child)
         return _ok(graph=graph)
 
     if action == "find_state_change_point":

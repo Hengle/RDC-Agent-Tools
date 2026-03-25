@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -170,8 +171,58 @@ def test_build_args_for_vfs_tools_use_vfs_paths(tmp_path: Path) -> None:
     tree_args = tool_contract_check._build_args("rd.vfs.tree", ["path", "session_id", "depth"], state, files)
     resolve_args = tool_contract_check._build_args("rd.vfs.resolve", ["path", "session_id"], state, files)
 
-    assert tree_args == {"path": "/draws", "session_id": "sess_demo", "depth": 2}
-    assert resolve_args == {"path": "/pipeline", "session_id": "sess_demo"}
+    assert tree_args == {"path": "/context", "session_id": "sess_demo", "depth": 1}
+    assert resolve_args == {"path": "/context", "session_id": "sess_demo"}
+
+
+def test_build_args_for_resource_contents_prefers_in_memory_artifact_flow(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc", session_id="sess_demo")
+    state.resource_id = "ResourceId::tex"
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    initial_args = tool_contract_check._build_args("rd.resource.get_initial_contents", ["session_id", "resource_id", "output_path"], state, files)
+    current_args = tool_contract_check._build_args("rd.resource.get_current_contents", ["session_id", "resource_id", "subresource", "range", "output_path"], state, files)
+
+    assert initial_args == {"session_id": "sess_demo", "resource_id": "ResourceId::tex"}
+    assert current_args == {
+        "session_id": "sess_demo",
+        "resource_id": "ResourceId::tex",
+        "subresource": {"mip": 0, "slice": 0, "sample": 0},
+        "range": {},
+    }
+
+
+def test_build_args_fall_back_to_known_handles_when_current_state_is_empty(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+    state.known_session_ids = ["sess_old", "sess_live"]
+    state.known_capture_file_ids = ["cap_old", "cap_live"]
+    state.shader_id = "ResourceId::178867"
+    state.texture_id = "ResourceId::178817"
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    open_replay_args = tool_contract_check._build_args("rd.capture.open_replay", ["capture_file_id", "options"], state, files)
+    macro_args = tool_contract_check._build_args("rd.macro.shader_hotfix_validate", ["session_id", "replacement", "validation", "output_dir"], state, files)
+    session_value = tool_contract_check._default_for_id("session_id", state)
+
+    assert open_replay_args["capture_file_id"] == "cap_live"
+    assert macro_args["session_id"] == "sess_live"
+    assert session_value == "sess_live"
 
 
 def test_build_args_for_session_update_context_uses_notes_round_trip_payload(tmp_path: Path) -> None:
@@ -237,6 +288,31 @@ def test_build_args_for_remote_connect_uses_android_bootstrap_defaults(monkeypat
     assert args["options"]["transport"] == "adb_android"
 
 
+def test_build_args_for_remote_open_replay_uses_live_remote_handle(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+    state.capture_file_id = "capf_remote"
+    state.remote_id = "remote_live"
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    args = tool_contract_check._build_args("rd.capture.open_replay", ["capture_file_id", "options"], state, files)
+
+    assert args == {"capture_file_id": "capf_remote", "options": {"remote_id": "remote_live"}}
+
+
+def test_tool_matrix_promotes_session_bound_tools_in_remote_only_mode() -> None:
+    assert tool_contract_check._tool_matrix("rd.event.get_actions", ["session_id"], remote_only=True) == "remote"
+    assert tool_contract_check._tool_matrix("rd.session.get_context", [], remote_only=True) == "remote"
+    assert tool_contract_check._tool_matrix("rd.util.diff_text", ["a", "b"], remote_only=True) == "local"
+
+
 def test_sample_compatibility_detects_cross_gpu_replay_error() -> None:
     message = (
         "OpenCapture failed with status: Current replaying hardware unsupported or incompatible with captured hardware: "
@@ -273,3 +349,83 @@ def test_track_tool_side_effects_updates_remote_handle_state(tmp_path: Path) -> 
         state,
     )
     assert state.remote_id is None
+
+
+def test_track_tool_side_effects_preserves_existing_focus_texture_and_buffer(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+    state.texture_id = "ResourceId::focus"
+    state.resource_id = "ResourceId::focus"
+    state.buffer_id = "ResourceId::buffer-focus"
+
+    tool_contract_check._track_tool_side_effects(
+        "rd.resource.list_textures",
+        {},
+        {
+            "ok": True,
+            "data": {"textures": [{"texture_id": "ResourceId::other"}]},
+        },
+        state,
+    )
+    tool_contract_check._track_tool_side_effects(
+        "rd.resource.list_buffers",
+        {},
+        {
+            "ok": True,
+            "data": {"buffers": [{"buffer_id": "ResourceId::buffer-other"}]},
+        },
+        state,
+    )
+
+    assert state.texture_id == "ResourceId::focus"
+    assert state.resource_id == "ResourceId::focus"
+    assert state.buffer_id == "ResourceId::buffer-focus"
+
+
+def test_ensure_context_builds_remote_replay_with_consumed_live_handle(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+    state.rdc_path.write_text("rdc", encoding="utf-8")
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+        "capture_copy": tmp_path / "capture-copy.rdc",
+    }
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def _call(name: str, args: dict[str, object], *, timeout_s: float | None = None):
+        calls.append((name, dict(args)))
+        if name == "rd.core.init":
+            return {"ok": True, "data": {}}, "", ""
+        if name == "rd.remote.connect":
+            return {"ok": True, "data": {"remote_id": "remote_demo"}}, "", ""
+        if name == "rd.remote.ping":
+            return {"ok": True, "data": {"pong": True}}, "", ""
+        if name == "rd.capture.open_file":
+            return {"ok": True, "data": {"capture_file_id": "capf_demo"}}, "", ""
+        if name == "rd.capture.open_replay":
+            return {"ok": True, "data": {"session_id": "sess_demo"}}, "", ""
+        if name == "rd.replay.set_frame":
+            return {"ok": True, "data": {"active_event_id": 1}}, "", ""
+        if name == "rd.event.get_actions":
+            return {"ok": True, "data": {"actions": []}}, "", ""
+        if name == "rd.resource.list_textures":
+            return {"ok": True, "data": {"textures": []}}, "", ""
+        if name == "rd.resource.list_buffers":
+            return {"ok": True, "data": {"buffers": []}}, "", ""
+        if name == "rd.pipeline.get_shader":
+            return {"ok": False, "error": {"code": "shader_not_bound", "message": "not bound"}}, "", ""
+        if name == "rd.perf.enumerate_counters":
+            return {"ok": True, "data": {"counters": []}}, "", ""
+        return {"ok": True, "data": {}}, "", ""
+
+    asyncio.run(tool_contract_check._ensure_context(_call, state, files, need_capture=True, need_remote=False))
+
+    assert state.capture_file_id == "capf_demo"
+    assert state.session_id == "sess_demo"
+    assert state.remote_id is None
+    assert ("rd.capture.open_replay", {"capture_file_id": "capf_demo", "options": {"remote_id": "remote_demo"}}) in calls

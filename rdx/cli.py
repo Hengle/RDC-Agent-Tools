@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -43,6 +45,66 @@ def _parse_json_object(raw: str, *, source: str) -> Dict[str, Any]:
     return parsed
 
 
+def _windows_command_line() -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        get_command_line = ctypes.windll.kernel32.GetCommandLineW
+        get_command_line.restype = ctypes.c_wchar_p
+        return str(get_command_line() or "")
+    except Exception:
+        return ""
+
+
+def _extract_raw_args_json_from_command_line(command_line: str) -> str:
+    raw = str(command_line or "")
+    if not raw:
+        return ""
+
+    match = re.search(r"(?:^|\s)--args-json\b", raw)
+    if match is None:
+        return ""
+
+    idx = match.end()
+    while idx < len(raw) and raw[idx].isspace():
+        idx += 1
+    if idx < len(raw) and raw[idx] == '"':
+        idx += 1
+    if idx >= len(raw) or raw[idx] not in "{[":
+        return ""
+
+    opening = raw[idx]
+    closing = "}" if opening == "{" else "]"
+    depth = 0
+    in_string = False
+    escaped = False
+    start = idx
+    while idx < len(raw):
+        ch = raw[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == opening:
+                depth += 1
+            elif ch == closing:
+                depth -= 1
+                if depth == 0:
+                    return raw[start : idx + 1]
+        idx += 1
+    return ""
+
+
+def _recover_args_json_from_command_line() -> str:
+    return _extract_raw_args_json_from_command_line(_windows_command_line())
+
+
 def _load_call_args(*, args_json: Optional[str] = None, args_file: Optional[str] = None) -> Dict[str, Any]:
     raw_json = str(args_json or "")
     raw_file = str(args_file or "").strip()
@@ -54,7 +116,7 @@ def _load_call_args(*, args_json: Optional[str] = None, args_file: Optional[str]
     if has_file:
         path = Path(raw_file).expanduser()
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8-sig")
         except OSError as exc:
             raise ValueError(f"--args-file could not be read: {path}") from exc
         try:
@@ -65,6 +127,12 @@ def _load_call_args(*, args_json: Optional[str] = None, args_file: Optional[str]
         try:
             return _parse_json_object(raw_json, source="--args-json")
         except json.JSONDecodeError as exc:
+            recovered = _recover_args_json_from_command_line()
+            if recovered and recovered != raw_json:
+                try:
+                    return _parse_json_object(recovered, source="--args-json")
+                except json.JSONDecodeError:
+                    pass
             raise ValueError(f"--args-json contains invalid JSON: {exc.msg}") from exc
     return {}
 

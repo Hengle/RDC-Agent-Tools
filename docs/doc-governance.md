@@ -105,7 +105,7 @@
 - `scripts/README.md`
 - `AGENTS.md`
 
-如果改动影响 release smoke 门禁、`rdx.bat` 非交互 launcher 入口，或 `tool_contract_check.py` / `smoke_report_aggregator.py` 的当前输出约定，也必须补一轮真实 local-only smoke 检查。
+如果改动影响 release smoke 门禁、`rdx.bat` 非交互 launcher 入口，或 `tool_contract_check.py` / `tool_contract_remote_smoke.py` / `smoke_report_aggregator.py` 的当前输出约定，也必须补一轮真实 local-only smoke 检查。
 如果改动影响 smoke 脚本的默认 transport、remote bootstrap 策略或环境变量覆盖方式，也必须同步写清“当前默认值”和“如何显式覆盖”，避免脚本文档与 `quickstart` / Android smoke 模板冲突。
 
 ## 4. 文档口径规则
@@ -165,6 +165,7 @@ python mcp/run_mcp.py --help
 ```bat
 python scripts/rdx_bat_command_smoke.py
 python scripts/tool_contract_check.py --local-rdc <external-rdc> --skip-remote --transport both
+python scripts/tool_contract_remote_smoke.py --rdc <external-rdc> --transport both
 python scripts/smoke_report_aggregator.py --command-json intermediate/logs/rdx_bat_command_smoke.json --tool-json intermediate/logs/tool_contract_report.json --out intermediate/logs/rdx_smoke_issues_blockers.md
 python scripts/release_gate.py --require-smoke-reports
 ```

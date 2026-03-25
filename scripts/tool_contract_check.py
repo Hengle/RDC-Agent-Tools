@@ -22,6 +22,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from rdx.daemon.client import cleanup_stale_daemon_states
 from rdx.runtime_paths import ensure_tools_root_env, ensure_runtime_dirs, artifacts_dir, binaries_root, pymodules_dir
 from scripts._shared import extract_json_payload, resolve_repo_path
 from rdx.timeout_policy import HARNESS_DEFAULT_TIMEOUT_S, REMOTE_CONNECT_DEFAULT_TIMEOUT_MS, harness_timeout_s
@@ -53,6 +54,30 @@ SAMPLE_COMPATIBILITY_SNIPPETS = (
 )
 
 SESSION_RETRY_LIMIT = 2
+REMOTE_RETRY_LIMIT = 2
+REMOTE_SESSION_TOOL_PREFIXES = (
+    "rd.capture.",
+    "rd.replay.",
+    "rd.event.",
+    "rd.pipeline.",
+    "rd.resource.",
+    "rd.texture.",
+    "rd.buffer.",
+    "rd.mesh.",
+    "rd.shader.",
+    "rd.debug.",
+    "rd.perf.",
+    "rd.export.",
+    "rd.diag.",
+    "rd.macro.",
+    "rd.session.",
+    "rd.vfs.",
+)
+SESSION_REFRESH_TOOLS = {
+    "rd.macro.shader_hotfix_validate",
+    "rd.session.select_session",
+    "rd.session.resume",
+}
 
 
 def _tools_root() -> Path:
@@ -131,8 +156,10 @@ def _coalesce_error(
 
 def _classify_transport_impact(tool: str, matrix: str, transport: str) -> str:
     if tool.startswith("rd.remote.") or matrix == "remote":
-        if matrix == "remote":
+        if tool.startswith("rd.remote."):
             return "only affects remote_id flow"
+        if matrix == "remote":
+            return "only affects remote session flow"
         return "only affects remote transport"
     if transport == "daemon":
         return "only affects daemon transport"
@@ -369,6 +396,20 @@ def _is_remote_matrix_tool(tool_name: str, param_names: list[str]) -> bool:
     return "remote_id" in param_names
 
 
+def _uses_remote_session(tool_name: str, param_names: list[str]) -> bool:
+    if tool_name.startswith(REMOTE_SESSION_TOOL_PREFIXES):
+        return True
+    return ("session_id" in param_names) or ("capture_file_id" in param_names)
+
+
+def _tool_matrix(tool_name: str, param_names: list[str], *, remote_only: bool = False) -> str:
+    if _is_remote_matrix_tool(tool_name, param_names):
+        return "remote"
+    if remote_only and _uses_remote_session(tool_name, param_names):
+        return "remote"
+    return "local"
+
+
 def _server_env() -> dict[str, str]:
     root = _tools_root()
     artifacts = Path(os.environ.get("RDX_ARTIFACT_DIR", str(artifacts_dir())))
@@ -439,6 +480,7 @@ class SampleState:
     debug_pc: int = 0
     debug_target: dict[str, Any] = field(default_factory=dict)
     debug_params: dict[str, Any] = field(default_factory=dict)
+    replacement_id: str | None = None
     remote_id: str | None = None
     remote_error_code: str = ""
     remote_issue_type: str = "remote_endpoint"
@@ -496,6 +538,17 @@ class DaemonExecutor:
             return False, detail[:2000]
 
         return await asyncio.to_thread(_stop)
+
+    async def clear_context(self) -> tuple[bool, str]:
+        def _clear() -> tuple[bool, str]:
+            code, out, err = self._run_cli(["context", "clear"], timeout_s=25.0)
+            payload = extract_json_payload(out)
+            if code == 0 and payload and bool(payload.get("ok")):
+                return True, ""
+            detail = (out + "\n" + err).strip()
+            return False, detail[:2000]
+
+        return await asyncio.to_thread(_clear)
 
     async def call_tool(
         self,
@@ -561,6 +614,45 @@ def _remote_connect_args() -> dict[str, Any]:
         args["options"] = options
     return args
 
+
+async def _ensure_live_remote_handle(call_fn: Any, state: SampleState, *, timeout_s: float = 20.0) -> None:
+    if state.remote_id:
+        return
+
+    state.remote_error_code = ""
+    state.remote_reason = ""
+    state.remote_issue_type = "remote_endpoint"
+    remote_payload, remote_raw, remote_exc = await call_fn(
+        "rd.remote.connect",
+        _remote_connect_args(),
+        timeout_s=timeout_s,
+    )
+    if remote_payload and remote_payload.get("ok"):
+        data = _payload_data(remote_payload)
+        state.remote_id = str(remote_payload.get("remote_id") or data.get("remote_id") or "")
+        if not state.remote_id:
+            state.remote_id = None
+            state.remote_error_code = "remote_id_missing"
+            state.remote_reason = "rd.remote.connect succeeded without returning remote_id"
+            return
+
+        ping_payload, ping_raw, ping_exc = await call_fn(
+            "rd.remote.ping",
+            {"remote_id": state.remote_id},
+            timeout_s=10.0,
+        )
+        if not (ping_payload and ping_payload.get("ok")):
+            state.remote_error_code, state.remote_reason = _coalesce_error(ping_payload, ping_raw, ping_exc)
+            state.remote_error_code = state.remote_error_code or "remote_ping_failed"
+            state.remote_reason = state.remote_reason or "rd.remote.ping failed"
+            state.remote_id = None
+        return
+
+    state.remote_error_code, state.remote_reason = _coalesce_error(remote_payload, remote_raw, remote_exc)
+    state.remote_error_code = state.remote_error_code or "remote_connect_failed"
+    state.remote_reason = state.remote_reason or "rd.remote.connect failed"
+
+
 async def _ensure_context(
     call_fn: Any,
     state: SampleState,
@@ -569,7 +661,9 @@ async def _ensure_context(
     need_capture: bool = True,
     need_remote: bool = True,
 ) -> None:
-    if need_capture and state.session_id and state.capture_file_id and (not need_remote or state.remote_id):
+    use_remote_replay = need_capture and state.matrix == "remote"
+
+    if need_capture and state.session_id and state.capture_file_id and (not need_remote or state.remote_id or use_remote_replay):
         return
     if not need_capture and need_remote and state.remote_id:
         return
@@ -588,34 +682,21 @@ async def _ensure_context(
         timeout_s=25.0,
     )
 
-    if need_capture:
-        if not state.rdc_path.is_file():
+    if use_remote_replay:
+        await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
+        if not state.remote_id:
             return
-        payload, _, _ = await call_fn(
-            "rd.capture.open_file",
-            {"file_path": str(state.rdc_path), "read_only": True},
-            timeout_s=30.0,
-        )
-        if payload and payload.get("ok"):
-            data = _payload_data(payload)
-            state.capture_file_id = str(payload.get("capture_file_id") or data.get("capture_file_id") or "")
-            if not state.capture_file_id:
-                state.capture_file_id = None
-            else:
-                _remember_capture_handle(state, state.capture_file_id)
-        elif payload:
-            code, message = _payload_error(payload)
-            if _is_sample_compatibility_error(message, code):
-                state.sample_compatibility = False
-                return
-            if _is_remote_app_dependency_error(message, code):
-                return
-            state.capture_file_id = None
+
+    if need_capture:
+        await _ensure_capture_handle(call_fn, state, files)
 
     if need_capture and state.capture_file_id:
+        open_replay_options: dict[str, Any] = {}
+        if use_remote_replay and state.remote_id:
+            open_replay_options["remote_id"] = state.remote_id
         payload, _, _ = await call_fn(
             "rd.capture.open_replay",
-            {"capture_file_id": state.capture_file_id, "options": {}},
+            {"capture_file_id": state.capture_file_id, "options": open_replay_options},
             timeout_s=35.0,
         )
         if payload and payload.get("ok"):
@@ -625,6 +706,8 @@ async def _ensure_context(
                 state.session_id = None
             else:
                 _remember_session_handle(state, state.session_id)
+                if use_remote_replay:
+                    state.remote_id = None
         elif payload:
             code, message = _payload_error(payload)
             if _is_sample_compatibility_error(message, code):
@@ -658,42 +741,48 @@ async def _ensure_context(
         draw_candidates: list[dict[str, Any]] = []
         actions_payload, _, _ = await call_fn(
             "rd.event.get_actions",
-            {"session_id": state.session_id, "include_markers": True, "include_drawcalls": True},
+            {"session_id": state.session_id, "include_markers": True, "include_drawcalls": True, "max_nodes": 512},
             timeout_s=20.0,
         )
         if actions_payload and actions_payload.get("ok"):
             actions = _payload_data(actions_payload).get("actions", [])
             if isinstance(actions, list):
-                fallback_event = None
-                first_draw_event = None
-                for item in _walk_action_nodes(actions):
-                    raw_event_id = item.get("event_id")
-                    try:
-                        event_id = int(raw_event_id)
-                    except Exception:
-                        continue
-                    if event_id <= 0:
-                        continue
-                    if fallback_event is None:
-                        fallback_event = event_id
-                    flags = item.get("flags")
-                    raw_outputs = item.get("outputs")
-                    outputs = [
-                        str(value)
-                        for value in raw_outputs
-                        if str(value) and str(value) != "ResourceId::0"
-                    ] if isinstance(raw_outputs, list) else []
-                    if isinstance(flags, dict) and bool(flags.get("is_draw")):
-                        if first_draw_event is None:
-                            first_draw_event = event_id
-                        if outputs:
-                            draw_candidates.append({"event_id": event_id, "outputs": outputs})
-                            if state.event_id <= 0 or state.event_id == first_draw_event:
-                                state.event_id = event_id
-                        elif state.event_id <= 0:
-                            state.event_id = event_id
-                if fallback_event is not None and state.event_id <= 0:
+                fallback_event, draw_candidates = _pick_representative_action_context(actions)
+                if state.event_id <= 0 and fallback_event > 0:
                     state.event_id = fallback_event
+
+        for candidate in draw_candidates[:1024]:
+            candidate_event = int(candidate.get("event_id") or 0)
+            outputs = [
+                str(value)
+                for value in candidate.get("outputs", [])
+                if str(value) and str(value) != "ResourceId::0"
+            ]
+            if candidate_event <= 0 or not outputs:
+                continue
+            await call_fn(
+                "rd.event.set_active",
+                {"session_id": state.session_id, "event_id": candidate_event},
+                timeout_s=20.0,
+            )
+            shader_probe, _, _ = await call_fn(
+                "rd.pipeline.get_shader",
+                {"session_id": state.session_id, "stage": "ps"},
+                timeout_s=20.0,
+            )
+            if not (shader_probe and shader_probe.get("ok")):
+                continue
+            shader = _payload_data(shader_probe).get("shader", {})
+            if not isinstance(shader, dict):
+                continue
+            shader_id = str(shader.get("shader_id") or "").strip()
+            if not shader_id:
+                continue
+            state.event_id = candidate_event
+            state.shader_id = shader_id
+            state.texture_id = outputs[0]
+            state.resource_id = outputs[0]
+            break
 
         if state.event_id > 0:
             await call_fn(
@@ -708,16 +797,15 @@ async def _ensure_context(
             timeout_s=20.0,
         )
         if tx_payload and tx_payload.get("ok"):
-            textures = _payload_data(tx_payload).get("textures", [])
-            if isinstance(textures, list) and textures and isinstance(textures[0], dict):
-                t0 = textures[0]
-                state.texture_id = str(t0.get("texture_id") or t0.get("resource_id") or "")
-                state.resource_id = state.texture_id or state.resource_id
+            texture_id = _first_texture_id_from_payload(tx_payload)
+            if texture_id:
+                state.texture_id = state.texture_id or texture_id
+                state.resource_id = state.resource_id or state.texture_id
         if draw_candidates:
             preferred_texture = str(draw_candidates[0]["outputs"][0])
             if preferred_texture:
-                state.texture_id = preferred_texture
-                state.resource_id = preferred_texture
+                state.texture_id = state.texture_id or preferred_texture
+                state.resource_id = state.resource_id or preferred_texture
 
         bu_payload, _, _ = await call_fn(
             "rd.resource.list_buffers",
@@ -725,10 +813,9 @@ async def _ensure_context(
             timeout_s=20.0,
         )
         if bu_payload and bu_payload.get("ok"):
-            buffers = _payload_data(bu_payload).get("buffers", [])
-            if isinstance(buffers, list) and buffers and isinstance(buffers[0], dict):
-                b0 = buffers[0]
-                state.buffer_id = str(b0.get("buffer_id") or b0.get("resource_id") or "")
+            buffer_id = _first_buffer_id_from_payload(bu_payload)
+            if buffer_id:
+                state.buffer_id = buffer_id
 
         sh_payload, _, _ = await call_fn(
             "rd.pipeline.get_shader",
@@ -864,46 +951,23 @@ async def _ensure_context(
             state.shader_debug_issue_type = "capability_boundary"
             state.shader_debug_reason = "pixel shader unavailable from current pipeline state"
 
-    if need_remote and not state.remote_id:
-        state.remote_error_code = ""
-        state.remote_reason = ""
-        state.remote_issue_type = "remote_endpoint"
-        remote_payload, remote_raw, remote_exc = await call_fn(
-            "rd.remote.connect",
-            _remote_connect_args(),
-            timeout_s=20.0,
-        )
-        if remote_payload and remote_payload.get("ok"):
-            data = _payload_data(remote_payload)
-            state.remote_id = str(remote_payload.get("remote_id") or data.get("remote_id") or "")
-            if not state.remote_id:
-                state.remote_id = None
-                state.remote_error_code = "remote_id_missing"
-                state.remote_reason = "rd.remote.connect succeeded without returning remote_id"
-            else:
-                ping_payload, ping_raw, ping_exc = await call_fn(
-                    "rd.remote.ping",
-                    {"remote_id": state.remote_id},
-                    timeout_s=10.0,
-                )
-                if not (ping_payload and ping_payload.get("ok")):
-                    state.remote_error_code, state.remote_reason = _coalesce_error(ping_payload, ping_raw, ping_exc)
-                    state.remote_error_code = state.remote_error_code or "remote_ping_failed"
-                    state.remote_reason = state.remote_reason or "rd.remote.ping failed"
-                    state.remote_id = None
-        else:
-            state.remote_error_code, state.remote_reason = _coalesce_error(remote_payload, remote_raw, remote_exc)
-            state.remote_error_code = state.remote_error_code or "remote_connect_failed"
-            state.remote_reason = state.remote_reason or "rd.remote.connect failed"
+    if need_remote:
+        await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
 
 def _default_for_id(param: str, state: SampleState) -> Any:
+    if param in {"event_id", "event_a", "event_b"}:
+        return None
     if param == "counter_id":
         return state.counter_id
     if param == "shader_debug_id":
         return state.shader_debug_id
+    preferred_session_id = str(state.session_id or (state.known_session_ids[-1] if state.known_session_ids else "")).strip() or None
+    preferred_capture_file_id = str(
+        state.capture_file_id or (state.known_capture_file_ids[-1] if state.known_capture_file_ids else "")
+    ).strip() or None
     known = {
-        "session_id": state.session_id,
-        "capture_file_id": state.capture_file_id,
+        "session_id": preferred_session_id,
+        "capture_file_id": preferred_capture_file_id,
         "resource_id": state.resource_id or state.texture_id,
         "texture_id": state.texture_id,
         "buffer_id": state.buffer_id,
@@ -911,6 +975,7 @@ def _default_for_id(param: str, state: SampleState) -> Any:
         "index_buffer_id": state.buffer_id,
         "shader_id": state.shader_id,
         "shader_debug_id": state.shader_debug_id,
+        "replacement_id": state.replacement_id,
         "remote_id": state.remote_id,
         "target_id": "target_dummy",
         "capture_id": "capture_dummy",
@@ -973,6 +1038,11 @@ def _track_tool_side_effects(
         session_id = str(payload.get("session_id") or data.get("session_id") or "").strip()
         if session_id:
             _remember_session_handle(state, session_id)
+        options = args.get("options") if isinstance(args.get("options"), dict) else {}
+        remote_id = str(options.get("remote_id") or "").strip()
+        if remote_id and state.remote_id == remote_id:
+            # Remote open_replay consumes the live handle; reconnect if later tools need a fresh remote_id.
+            state.remote_id = None
         return
 
     if tool == "rd.capture.close_replay":
@@ -981,6 +1051,32 @@ def _track_tool_side_effects(
 
     if tool == "rd.capture.close_file":
         _forget_capture_handle(state, str(args.get("capture_file_id") or ""))
+        return
+
+    if tool == "rd.event.get_actions":
+        actions = data.get("actions", [])
+        if isinstance(actions, list):
+            fallback_event, draw_candidates = _pick_representative_action_context(actions)
+            if state.event_id <= 0 and fallback_event > 0:
+                state.event_id = fallback_event
+            if draw_candidates:
+                outputs = [
+                    str(value)
+                    for value in draw_candidates[0].get("outputs", [])
+                    if str(value) and str(value) != "ResourceId::0"
+                ]
+                if outputs:
+                    state.texture_id = state.texture_id or outputs[0]
+                    state.resource_id = state.resource_id or outputs[0]
+        return
+
+    if tool == "rd.event.set_active":
+        try:
+            event_id = int(args.get("event_id") or 0)
+        except Exception:
+            event_id = 0
+        if event_id > 0:
+            state.event_id = event_id
         return
 
     if tool == "rd.remote.connect":
@@ -998,6 +1094,41 @@ def _track_tool_side_effects(
     if tool == "rd.core.shutdown":
         state.known_session_ids.clear()
         state.known_capture_file_ids.clear()
+        state.remote_id = None
+        return
+
+    if tool == "rd.shader.edit_and_replace":
+        replacement_id = str(data.get("replacement_id") or "").strip()
+        if replacement_id:
+            state.replacement_id = replacement_id
+        return
+
+    if tool == "rd.resource.list_textures":
+        texture_id = _first_texture_id_from_payload(payload)
+        if texture_id:
+            state.texture_id = state.texture_id or texture_id
+            state.resource_id = state.resource_id or texture_id
+        return
+
+    if tool == "rd.resource.list_buffers":
+        buffer_id = _first_buffer_id_from_payload(payload)
+        if buffer_id:
+            state.buffer_id = state.buffer_id or buffer_id
+        return
+
+    if tool == "rd.pipeline.get_shader":
+        shader = data.get("shader", {})
+        if isinstance(shader, dict):
+            shader_id = str(shader.get("shader_id") or "").strip()
+            if shader_id:
+                state.shader_id = shader_id
+        resolved_event_id = data.get("resolved_event_id")
+        try:
+            resolved_event = int(resolved_event_id or 0)
+        except Exception:
+            resolved_event = 0
+        if resolved_event > 0:
+            state.event_id = resolved_event
 
 
 async def _cleanup_known_sessions(call_fn: Any, state: SampleState) -> None:
@@ -1093,13 +1224,15 @@ async def _stabilize_destructive_tail_result(
     if tool == "rd.core.shutdown" and _is_shutdown_transport_teardown(error_message or exc):
         return (
             {
-                "schema_version": "2.0.0",
+                "schema_version": "3.0.0",
                 "tool_version": "1.0.0",
                 "result_kind": "rd.core.shutdown",
                 "ok": True,
                 "data": {"released": {"note": "transport closed after shutdown"}},
                 "artifacts": [],
                 "error": None,
+                "meta": {},
+                "projections": {},
             },
             raw,
             "",
@@ -1111,13 +1244,15 @@ async def _stabilize_destructive_tail_result(
             if _is_shutdown_transport_teardown(error_message or exc):
                 return (
                     {
-                        "schema_version": "2.0.0",
+                        "schema_version": "3.0.0",
                         "tool_version": "1.0.0",
                         "result_kind": "rd.capture.close_file",
                         "ok": True,
                         "data": {"capture_file_id": capture_file_id},
                         "artifacts": [],
                         "error": None,
+                        "meta": {},
+                        "projections": {},
                     },
                     raw,
                     "",
@@ -1131,17 +1266,38 @@ async def _stabilize_destructive_tail_result(
             if "unknown capture_file_id" in str(probe_message or "").lower():
                 return (
                     {
-                        "schema_version": "2.0.0",
+                        "schema_version": "3.0.0",
                         "tool_version": "1.0.0",
                         "result_kind": "rd.capture.close_file",
                         "ok": True,
                         "data": {"capture_file_id": capture_file_id},
                         "artifacts": [],
                         "error": None,
+                        "meta": {},
+                        "projections": {},
                     },
                     raw,
                     "",
                 )
+
+    if tool == "rd.capture.close_replay":
+        session_id = str(args.get("session_id") or "").strip()
+        if session_id and "unknown session_id" in str(error_message or "").lower():
+            return (
+                {
+                    "schema_version": "3.0.0",
+                    "tool_version": "1.0.0",
+                    "result_kind": "rd.capture.close_replay",
+                    "ok": True,
+                    "data": {"session_id": session_id},
+                    "artifacts": [],
+                    "error": None,
+                    "meta": {},
+                    "projections": {},
+                },
+                raw,
+                "",
+            )
 
     return payload, raw, exc
 
@@ -1175,11 +1331,91 @@ def _walk_action_nodes(nodes: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _pick_representative_action_context(actions: list[Any]) -> tuple[int, list[dict[str, Any]]]:
+    fallback_event = 0
+    draw_candidates: list[dict[str, Any]] = []
+    for item in _walk_action_nodes(actions):
+        raw_event_id = item.get("event_id")
+        try:
+            event_id = int(raw_event_id)
+        except Exception:
+            continue
+        if event_id <= 0:
+            continue
+        if fallback_event <= 0:
+            fallback_event = event_id
+        flags = item.get("flags")
+        raw_outputs = item.get("outputs")
+        outputs = [
+            str(value)
+            for value in raw_outputs
+            if str(value) and str(value) != "ResourceId::0"
+        ] if isinstance(raw_outputs, list) else []
+        if isinstance(flags, dict) and bool(flags.get("is_draw")):
+            draw_candidates.append({"event_id": event_id, "outputs": outputs})
+    return fallback_event, draw_candidates
+
+
+def _first_texture_id_from_payload(payload: dict[str, Any] | None) -> str | None:
+    textures = _payload_data(payload).get("textures", []) if isinstance(payload, dict) else []
+    if not isinstance(textures, list):
+        return None
+    for item in textures:
+        if not isinstance(item, dict):
+            continue
+        texture_id = str(item.get("texture_id") or item.get("resource_id") or "").strip()
+        if texture_id and texture_id != "ResourceId::0":
+            return texture_id
+    return None
+
+
+def _first_buffer_id_from_payload(payload: dict[str, Any] | None) -> str | None:
+    buffers = _payload_data(payload).get("buffers", []) if isinstance(payload, dict) else []
+    if not isinstance(buffers, list):
+        return None
+    for item in buffers:
+        if not isinstance(item, dict):
+            continue
+        buffer_id = str(item.get("buffer_id") or item.get("resource_id") or "").strip()
+        if buffer_id and buffer_id != "ResourceId::0":
+            return buffer_id
+    return None
+
+
+async def _ensure_capture_handle(call_fn: Any, state: SampleState, files: dict[str, Path]) -> None:
+    if state.capture_file_id:
+        return
+    if not state.rdc_path.is_file():
+        return
+    payload, _, _ = await call_fn(
+        "rd.capture.open_file",
+        {"file_path": str(state.rdc_path), "read_only": True},
+        timeout_s=30.0,
+    )
+    if payload and payload.get("ok"):
+        data = _payload_data(payload)
+        state.capture_file_id = str(payload.get("capture_file_id") or data.get("capture_file_id") or "")
+        if not state.capture_file_id:
+            state.capture_file_id = None
+        else:
+            _remember_capture_handle(state, state.capture_file_id)
+
+
 def _sample_positions(extent: int) -> list[int]:
     extent = max(int(extent), 1)
     if extent <= 2:
         return sorted({0, max(0, extent - 1)})
-    return sorted({0, max(0, extent // 2), max(0, extent - 1)})
+    if extent <= 4:
+        return sorted({0, max(0, extent // 2), max(0, extent - 1)})
+    return sorted(
+        {
+            0,
+            max(0, extent // 4),
+            max(0, extent // 2),
+            max(0, (extent * 3) // 4),
+            max(0, extent - 1),
+        }
+    )
 
 
 def _valid_primitive_id(value: Any) -> int | None:
@@ -1200,7 +1436,7 @@ async def _pick_shader_debug_candidate(
     last_code = ""
     last_message = ""
 
-    for candidate in draw_candidates[:18]:
+    for candidate in draw_candidates[:256]:
         try:
             event_id = int(candidate.get("event_id") or 0)
         except Exception:
@@ -1348,13 +1584,98 @@ def _covered_preflight_pass(
 
 
 def _build_args(tool: str, param_names: list[str], state: SampleState, files: dict[str, Path]) -> dict[str, Any]:
+    preferred_session_id = str(state.session_id or (state.known_session_ids[-1] if state.known_session_ids else "")).strip() or None
+    preferred_capture_file_id = str(
+        state.capture_file_id or (state.known_capture_file_ids[-1] if state.known_capture_file_ids else "")
+    ).strip() or None
     if tool == "rd.remote.connect":
         return _remote_connect_args()
+    if tool == "rd.capture.open_replay":
+        args: dict[str, Any] = {}
+        if preferred_capture_file_id:
+            args["capture_file_id"] = preferred_capture_file_id
+        options: dict[str, Any] = {}
+        if state.matrix == "remote" and state.remote_id:
+            options["remote_id"] = state.remote_id
+        args["options"] = options
+        return args
+    if tool == "rd.shader.edit_and_replace":
+        args: dict[str, Any] = {
+            "session_id": state.session_id,
+            "stage": "ps",
+            "event_id": int(state.event_id or 1),
+            "intent": "analysis",
+            "max_diff_ops": 1,
+            "ops": [
+                {
+                    "op": "replace_expr",
+                    "expr_from": "0",
+                    "expr_to": "0",
+                }
+            ],
+        }
+        if state.shader_id:
+            args["shader_id"] = state.shader_id
+        if state.replacement_id:
+            args["replacement_id"] = state.replacement_id
+        return args
+    if tool == "rd.macro.shader_hotfix_validate":
+        replacement: dict[str, Any] = {
+            "stage": "ps",
+            "event_id": int(state.event_id or 1),
+            "ops": [
+                {
+                    "op": "replace_expr",
+                    "expr_from": "0",
+                    "expr_to": "0",
+                }
+            ],
+        }
+        if state.shader_id:
+            replacement["shader_id"] = state.shader_id
+        validation: dict[str, Any] = {"x": int(state.debug_x), "y": int(state.debug_y)}
+        if state.texture_id:
+            validation["target_texture_id"] = state.texture_id
+        return {
+            "session_id": preferred_session_id,
+            "replacement": replacement,
+            "validation": validation,
+            "output_dir": str(files["artifacts"]),
+        }
+    if tool == "rd.resource.get_initial_contents":
+        args = {
+            "session_id": preferred_session_id,
+            "resource_id": state.resource_id or state.texture_id,
+        }
+        return {k: v for k, v in args.items() if v is not None}
+    if tool == "rd.resource.get_current_contents":
+        args = {
+            "session_id": preferred_session_id,
+            "resource_id": state.resource_id or state.texture_id,
+            "subresource": {"mip": 0, "slice": 0, "sample": 0},
+            "range": {},
+        }
+        return {k: v for k, v in args.items() if v is not None}
+    if tool == "rd.texture.diff":
+        texture_id = state.texture_id or state.resource_id
+        return {
+            "session_id": preferred_session_id,
+            "tex_a": {"texture_id": texture_id, "subresource": {"mip": 0, "slice": 0, "sample": 0}},
+            "tex_b": {"texture_id": texture_id, "subresource": {"mip": 0, "slice": 0, "sample": 0}},
+            "metric": "mse",
+            "output_path": str(files["artifacts"] / f"{state.matrix}_{tool.replace('.', '_')}.out"),
+        }
 
     args: dict[str, Any] = {}
     for param in param_names:
         if hasattr(state, param):
             direct = getattr(state, param)
+            if param in {"event_id", "event_a", "event_b"}:
+                try:
+                    if int(direct or 0) <= 0:
+                        direct = None
+                except Exception:
+                    direct = None
             if direct is not None:
                 args[param] = direct
                 continue
@@ -1389,9 +1710,9 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             if tool == "rd.vfs.ls":
                 args[param] = "/"
             elif tool == "rd.vfs.tree":
-                args[param] = "/draws"
+                args[param] = "/context"
             elif tool == "rd.vfs.resolve":
-                args[param] = "/pipeline"
+                args[param] = "/context"
             else:
                 args[param] = "/context"
         elif param == "path":
@@ -1440,7 +1761,14 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             "older_than_ms",
             "max_total_bytes",
         }:
-            args[param] = 2 if tool == "rd.vfs.tree" and param == "depth" else 0
+            if tool == "rd.vfs.tree" and param == "depth":
+                args[param] = 1
+            elif tool in {"rd.event.get_actions", "rd.event.get_action_tree"} and param == "max_nodes":
+                args[param] = 512
+            elif tool == "rd.macro.resource_dependency_graph" and param == "max_nodes":
+                args[param] = 32
+            else:
+                args[param] = 0
         elif param == "timeout_ms":
             args[param] = 50 if tool == "rd.debug.run_to" else 0
         elif param in {"view", "instance", "view_index"}:
@@ -1471,6 +1799,8 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             args[param] = f"{state.matrix} contract test"
         elif param == "verbosity":
             args[param] = "short"
+        elif param == "level":
+            args[param] = "info"
         elif param == "marker_policy":
             args[param] = "markers"
         elif param == "name_regex":
@@ -1715,9 +2045,150 @@ def _classify_result(
     )
 
 
+def _is_remote_handle_failure(payload: dict[str, Any] | None, raw: str | None, exc: str | None) -> bool:
+    code, message = _coalesce_error(payload, raw, exc)
+    haystack = " ".join([str(code or ""), str(message or "")]).lower()
+    return ("remote_handle_consumed" in haystack) or ("unknown remote_id" in haystack)
+
+
+def _is_shader_binding_failure(payload: dict[str, Any] | None, raw: str | None, exc: str | None) -> bool:
+    code, message = _coalesce_error(payload, raw, exc)
+    haystack = " ".join([str(code or ""), str(message or "")]).lower()
+    return any(
+        token in haystack
+        for token in (
+            "shader_not_bound",
+            "shader_bundle_empty",
+        )
+    )
+
+
+def _is_replay_focus_failure(
+    tool: str,
+    payload: dict[str, Any] | None,
+    raw: str | None,
+    exc: str | None,
+) -> bool:
+    if _is_shader_binding_failure(payload, raw, exc):
+        return True
+    code, message = _coalesce_error(payload, raw, exc)
+    haystack = " ".join([str(code or ""), str(message or "")]).lower()
+    if tool == "rd.texture.diff" and "tuple index out of range" in haystack:
+        return True
+    return False
+
+
+async def _repair_shader_focus(
+    call_fn: Any,
+    state: SampleState,
+) -> bool:
+    if not state.session_id:
+        return False
+
+    actions_payload, _, _ = await call_fn(
+        "rd.event.get_actions",
+        {"session_id": state.session_id, "include_markers": True, "include_drawcalls": True, "max_nodes": 512},
+        timeout_s=20.0,
+    )
+    if not (actions_payload and actions_payload.get("ok")):
+        return False
+
+    actions = _payload_data(actions_payload).get("actions", [])
+    if not isinstance(actions, list):
+        return False
+
+    _, draw_candidates = _pick_representative_action_context(actions)
+    for candidate in draw_candidates[:1024]:
+        candidate_event = int(candidate.get("event_id") or 0)
+        outputs = [
+            str(value)
+            for value in candidate.get("outputs", [])
+            if str(value) and str(value) != "ResourceId::0"
+        ]
+        if candidate_event <= 0 or not outputs:
+            continue
+        await call_fn(
+            "rd.event.set_active",
+            {"session_id": state.session_id, "event_id": candidate_event},
+            timeout_s=20.0,
+        )
+        shader_probe, _, _ = await call_fn(
+            "rd.pipeline.get_shader",
+            {"session_id": state.session_id, "stage": "ps"},
+            timeout_s=20.0,
+        )
+        if not (shader_probe and shader_probe.get("ok")):
+            continue
+        shader = _payload_data(shader_probe).get("shader", {})
+        if not isinstance(shader, dict):
+            continue
+        shader_id = str(shader.get("shader_id") or "").strip()
+        if not shader_id:
+            continue
+        state.event_id = candidate_event
+        state.shader_id = shader_id
+        state.texture_id = outputs[0]
+        state.resource_id = state.resource_id or outputs[0]
+        return True
+    return False
+
+
+async def _rebuild_replay_context(
+    call_fn: Any,
+    state: SampleState,
+    files: dict[str, Path],
+) -> None:
+    await _cleanup_known_sessions(call_fn, state)
+    state.session_id = None
+    state.event_id = 0
+    state.shader_id = None
+    state.shader_debug_id = None
+    state.shader_debug_error_code = ""
+    state.shader_debug_issue_type = ""
+    state.shader_debug_reason = ""
+    state.debug_pc = 0
+    state.debug_target = {}
+    state.debug_params = {}
+    state.replacement_id = None
+    await call_fn(
+        "rd.core.init",
+        {
+            "global_env": {"artifact_dir": str(files["artifacts"])},
+            "enable_remote": True,
+        },
+        timeout_s=25.0,
+    )
+    if state.matrix == "remote":
+        await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
+    await _ensure_capture_handle(call_fn, state, files)
+    if not state.capture_file_id:
+        return
+    open_replay_options: dict[str, Any] = {}
+    if state.matrix == "remote" and state.remote_id:
+        open_replay_options["remote_id"] = state.remote_id
+    payload, _, _ = await call_fn(
+        "rd.capture.open_replay",
+        {"capture_file_id": state.capture_file_id, "options": open_replay_options},
+        timeout_s=35.0,
+    )
+    if not (payload and payload.get("ok")):
+        return
+    data = _payload_data(payload)
+    state.session_id = str(payload.get("session_id") or data.get("session_id") or "")
+    if not state.session_id:
+        state.session_id = None
+        return
+    _remember_session_handle(state, state.session_id)
+    if state.matrix == "remote":
+        state.remote_id = None
+    await call_fn("rd.replay.set_frame", {"session_id": state.session_id, "frame_index": 0}, timeout_s=20.0)
+    await _repair_shader_focus(call_fn, state)
+
+
 async def _invoke_with_repair(
     call_fn: Any,
     tool: str,
+    param_names: list[str],
     args: dict[str, Any],
     state: SampleState,
     files: dict[str, Path],
@@ -1732,27 +2203,50 @@ async def _invoke_with_repair(
         _ensure_fixture_inputs(files)
         payload, raw, exc = await call_fn(tool, attempt_args, timeout_s=timeout_s)
         last_payload, last_raw, last_exc = payload, raw, exc
+        remote_handle_failure = _is_remote_handle_failure(payload, raw, exc)
+        replay_focus_failure = _is_replay_focus_failure(tool, payload, raw, exc)
+        session_failure = _is_session_related_failure(payload)
 
-        if payload is not None and not _is_session_related_failure(payload):
+        if payload is not None and not session_failure and not remote_handle_failure and not replay_focus_failure:
             return payload, raw, exc
 
         if exc and "TaskGroup" in exc:
             return payload, raw, exc
 
-        if not _is_session_related_failure(payload) and not ("session" in (str(exc).lower())):
-            return payload, raw, exc
+        if not session_failure and not ("session" in (str(exc).lower())):
+            if not remote_handle_failure and not replay_focus_failure:
+                return payload, raw, exc
 
         if attempt >= SESSION_RETRY_LIMIT:
             break
 
-        if _is_session_related_failure(payload) or "session" in (str(exc).lower()):
-            await _ensure_context(call_fn, state, files, need_capture=True, need_remote=False)
-            attempt_args = dict(args)
-            for key in list(attempt_args.keys()):
-                if hasattr(state, key):
-                    value = getattr(state, key)
-                    if value is not None:
-                        attempt_args[key] = value
+        if remote_handle_failure:
+            if tool.startswith("rd.remote.") or ("remote_id" in args):
+                state.remote_id = None
+                await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
+                attempt_args = dict(args)
+                remote_id = str(state.remote_id or "").strip()
+                if remote_id:
+                    if "remote_id" in attempt_args:
+                        attempt_args["remote_id"] = remote_id
+                    options = attempt_args.get("options")
+                    if isinstance(options, dict) and "remote_id" in options:
+                        attempt_args["options"] = {**options, "remote_id": remote_id}
+                    continue
+
+        if session_failure or "session" in (str(exc).lower()):
+            await _rebuild_replay_context(call_fn, state, files)
+            attempt_args = _build_args(tool, param_names, state, files)
+            continue
+
+        if replay_focus_failure:
+            repaired = await _repair_shader_focus(call_fn, state)
+            if repaired:
+                attempt_args = _build_args(tool, param_names, state, files)
+                continue
+            await _rebuild_replay_context(call_fn, state, files)
+            attempt_args = _build_args(tool, param_names, state, files)
+            continue
 
     return last_payload, last_raw, last_exc
 
@@ -1760,10 +2254,10 @@ async def _invoke_with_repair(
 def _ordered_tool_names(names: list[str]) -> list[str]:
     tail = [name for name in DESTRUCTIVE_TAIL if name in names]
     tail_set = set(tail)
-    ordered = [n for n in names if n and n not in tail_set and n != "rd.remote.disconnect"]
+    arranged = [n for n in names if n and n not in tail_set and n != "rd.remote.disconnect"]
     if "rd.remote.disconnect" in names:
-        ordered.append("rd.remote.disconnect")
-    return ordered + tail
+        arranged.append("rd.remote.disconnect")
+    return arranged + tail
 
 
 def _transport_summary(items: list[dict[str, Any]]) -> dict[str, int]:
@@ -1910,6 +2404,7 @@ async def _run_transport_mcp(
     remote_rdc: Path,
     *,
     skip_remote: bool = False,
+    remote_only: bool = False,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     listed_names: set[str] = set()
@@ -1956,8 +2451,10 @@ async def _run_transport_mcp(
 
                 for name in _ordered_tool_names(names):
                     param_names = params_map.get(name, [])
-                    matrix = "remote" if _is_remote_matrix_tool(name, param_names) else "local"
+                    matrix = _tool_matrix(name, param_names, remote_only=remote_only)
                     state = states[matrix]
+                    needs_remote_session = matrix == "remote" and remote_only and _uses_remote_session(name, param_names)
+                    is_remote_open_replay = matrix == "remote" and remote_only and name == "rd.capture.open_replay"
                     if skip_remote and matrix == "remote":
                         args = _build_args(name, param_names, states["local"], files)
                         items.append(
@@ -1979,7 +2476,7 @@ async def _run_transport_mcp(
                         continue
                     requires_capture = ("session_id" in param_names) or ("capture_file_id" in param_names)
                     had_remote_id = bool(state.remote_id)
-                    if matrix == "remote" and not state.remote_id:
+                    if matrix == "remote" and _is_remote_matrix_tool(name, param_names) and not state.remote_id:
                         await _ensure_context(_call_mcp, state, files, need_capture=False, need_remote=True)
                         if state.remote_id and not had_remote_id:
                             remote_workflow_events.append(f"mcp-connect:{state.remote_id}")
@@ -2005,6 +2502,11 @@ async def _run_transport_mcp(
                             },
                         )
                         continue
+                    if is_remote_open_replay:
+                        await _ensure_capture_handle(_call_mcp, state, files)
+                        await _ensure_live_remote_handle(_call_mcp, state, timeout_s=20.0)
+                    elif needs_remote_session and not (state.session_id and state.capture_file_id):
+                        await _ensure_context(_call_mcp, state, files, need_capture=True, need_remote=False)
                     if "session_id" in param_names and not (state.session_id and state.capture_file_id):
                         await _ensure_context(_call_mcp, state, files, need_capture=True, need_remote=False)
                     elif "capture_file_id" in param_names and not state.capture_file_id:
@@ -2081,7 +2583,7 @@ async def _run_transport_mcp(
                         await _cleanup_known_sessions(_call_mcp, state)
 
                     args = _build_args(name, param_names, state, files)
-                    payload, raw, exc = await _invoke_with_repair(_call_mcp, name, args, state, files)
+                    payload, raw, exc = await _invoke_with_repair(_call_mcp, name, param_names, args, state, files)
                     payload, raw, exc = await _stabilize_destructive_tail_result(_call_mcp, name, args, payload, raw, exc)
 
                     callable_ok = payload is not None
@@ -2212,10 +2714,11 @@ async def _run_transport_daemon(
     daemon_context_prefix: str,
     *,
     skip_remote: bool = False,
+    remote_only: bool = False,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     fatal_error = ""
-    cleanup: dict[str, Any] = {}
+    cleanup: dict[str, Any] = {"preclean": cleanup_stale_daemon_states()}
     remote_workflow_events: list[str] = []
     context_name = f"{daemon_context_prefix}-{uuid.uuid4().hex[:8]}"
     executor = DaemonExecutor(root=root, context_name=context_name)
@@ -2250,8 +2753,10 @@ async def _run_transport_daemon(
     try:
         for name in _ordered_tool_names(names):
             param_names = params_map.get(name, [])
-            matrix = "remote" if _is_remote_matrix_tool(name, param_names) else "local"
+            matrix = _tool_matrix(name, param_names, remote_only=remote_only)
             state = states[matrix]
+            needs_remote_session = matrix == "remote" and remote_only and _uses_remote_session(name, param_names)
+            is_remote_open_replay = matrix == "remote" and remote_only and name == "rd.capture.open_replay"
             requires_capture = ("session_id" in param_names) or ("capture_file_id" in param_names)
             if skip_remote and matrix == "remote":
                 args = _build_args(name, param_names, states["local"], files)
@@ -2277,7 +2782,7 @@ async def _run_transport_daemon(
                 continue
             if matrix == "remote":
                 remote_workflow_events.append(f"daemon-tool:{name}")
-            if matrix == "remote" and not state.remote_id:
+            if matrix == "remote" and _is_remote_matrix_tool(name, param_names) and not state.remote_id:
                 had_remote_id = bool(state.remote_id)
                 await _ensure_context(_call_daemon, state, files, need_capture=False, need_remote=True)
                 if state.remote_id and not had_remote_id:
@@ -2307,6 +2812,11 @@ async def _run_transport_daemon(
                     },
                 )
                 continue
+            if is_remote_open_replay:
+                await _ensure_capture_handle(_call_daemon, state, files)
+                await _ensure_live_remote_handle(_call_daemon, state, timeout_s=20.0)
+            elif needs_remote_session and not (state.session_id and state.capture_file_id):
+                await _ensure_context(_call_daemon, state, files, need_capture=True, need_remote=False)
             if "session_id" in param_names and not (state.session_id and state.capture_file_id):
                 await _ensure_context(_call_daemon, state, files, need_capture=True, need_remote=False)
             elif "capture_file_id" in param_names and not state.capture_file_id:
@@ -2334,6 +2844,8 @@ async def _run_transport_daemon(
                     ),
                 )
                 continue
+            if matrix == "remote" and name in SESSION_REFRESH_TOOLS:
+                await _rebuild_replay_context(_call_daemon, state, files)
 
             covered_pass = _covered_preflight_pass(name, param_names, state)
             if covered_pass is not None:
@@ -2389,7 +2901,7 @@ async def _run_transport_daemon(
                 await _cleanup_known_sessions(_call_daemon, state)
 
             args = _build_args(name, param_names, state, files)
-            payload, raw, exc = await _invoke_with_repair(_call_daemon, name, args, state, files)
+            payload, raw, exc = await _invoke_with_repair(_call_daemon, name, param_names, args, state, files)
             payload, raw, exc = await _stabilize_destructive_tail_result(_call_daemon, name, args, payload, raw, exc)
             callable_ok = payload is not None
             contract_ok = bool(payload is not None and all(key in payload for key in CANONICAL_KEYS))
@@ -2451,6 +2963,9 @@ async def _run_transport_daemon(
     except Exception:  # noqa: BLE001
         fatal_error = traceback.format_exc()
     finally:
+        clear_ok, clear_detail = await executor.clear_context()
+        cleanup["context_clear_ok"] = clear_ok
+        cleanup["context_clear_detail"] = clear_detail
         stop_ok, stop_detail = await executor.shutdown()
         cleanup["daemon_stop_ok"] = stop_ok
         cleanup["daemon_stop_detail"] = stop_detail
@@ -2515,10 +3030,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--transport", choices=["mcp", "daemon", "both"], default="both")
     parser.add_argument("--daemon-context-prefix", default="rdx-smoke")
     parser.add_argument("--skip-remote", action="store_true", help="Skip remote-only tools and remote matrix validation in local smoke mode.")
+    parser.add_argument("--remote-only", action="store_true", help="Run replay-bound tools against the remote Android session instead of the local replay branch.")
     parser.add_argument("--artifact-dir", default="", help="Optional artifact root for temporary data.")
     parser.add_argument("--out-json", default="intermediate/logs/tool_contract_report.json")
     parser.add_argument("--out-md", default="intermediate/logs/tool_contract_report.md")
     args = parser.parse_args(argv)
+    if args.remote_only and args.skip_remote:
+        parser.error("--remote-only cannot be combined with --skip-remote")
     if (not args.skip_remote) and (not str(args.remote_rdc or "").strip()):
         parser.error("--remote-rdc is required unless --skip-remote is set")
     return args
@@ -2567,6 +3085,7 @@ def main() -> int:
                 local_rdc,
                 remote_rdc,
                 skip_remote=args.skip_remote,
+                remote_only=bool(args.remote_only),
             ),
         )
     if args.transport in {"daemon", "both"}:
@@ -2580,6 +3099,7 @@ def main() -> int:
                 remote_rdc,
                 args.daemon_context_prefix,
                 skip_remote=args.skip_remote,
+                remote_only=bool(args.remote_only),
             ),
         )
 

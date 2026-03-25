@@ -29,6 +29,10 @@
   - local-only 真实样本验证使用 `--local-rdc <path> --skip-remote --transport both`。
   - 若同时提供 `--remote-rdc`，当前 remote matrix 默认走 Android `adb` bootstrap，也就是 `rd.remote.connect(options.transport="adb_android")`。
   - 如需覆盖 remote 行为，可通过环境变量指定：`RDX_REMOTE_CONNECT_TRANSPORT`、`RDX_REMOTE_DEVICE_SERIAL`、`RDX_REMOTE_LOCAL_PORT`、`RDX_REMOTE_INSTALL_APK`、`RDX_REMOTE_PUSH_CONFIG`。
+- `tool_contract_remote_smoke.py`
+  - Android remote-only catalog 全量 smoke 正式入口。
+  - 包装 `tool_contract_check.py --remote-only`，统一 `--rdc`、`--transport`、`--daemon-context-prefix`、`--artifact-dir`、`--out-json`、`--out-md` 入参。
+  - 适用于“同一份 `.rdc` 同时作为 `capture open_file` 与 remote `open_replay` 样本”的正式 remote-only 验证。
 - `smoke_report_aggregator.py`
   - 聚合 blockers / detailed 汇总报告。
   - 输入 `rdx_bat_command_smoke.json` 与 `tool_contract_report.json`，输出当前 markdown 汇总报告。

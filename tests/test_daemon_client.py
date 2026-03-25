@@ -14,6 +14,23 @@ def _configure_runtime_dir(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(daemon_client, "SESSION_STATE_FILE", state_dir / "session_state.json")
 
 
+def _configure_context_artifact_paths(monkeypatch, tmp_path: Path) -> Path:
+    state_dir = tmp_path / "runtime"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    def _ctx_path(prefix: str, suffix: str, context: str = "default") -> Path:
+        ctx = daemon_client._normalize_context(context)
+        if ctx == "default":
+            return state_dir / f"{prefix}{suffix}"
+        return state_dir / f"{prefix}_{daemon_client._sanitize_context(ctx)}{suffix}"
+
+    monkeypatch.setattr(daemon_client, "context_state_path", lambda context="default": _ctx_path("runtime_state", ".json", context))
+    monkeypatch.setattr(daemon_client, "context_snapshot_path", lambda context="default": _ctx_path("context_snapshot", ".json", context))
+    monkeypatch.setattr(daemon_client, "context_log_path", lambda context="default": _ctx_path("runtime_logs", ".jsonl", context))
+    monkeypatch.setattr(daemon_client, "worker_state_path", lambda context="default": _ctx_path("worker_state", ".json", context))
+    return state_dir
+
+
 def test_session_state_isolated_by_context(monkeypatch, tmp_path: Path) -> None:
     _configure_runtime_dir(monkeypatch, tmp_path)
 
@@ -87,6 +104,32 @@ def test_cleanup_stale_daemon_state_skips_invalid_json(monkeypatch, tmp_path: Pa
     assert cleaned["state_files"] == []
     assert cleaned["session_files"] == []
     assert state_path.exists()
+
+
+def test_cleanup_stale_daemon_states_clears_orphan_context_artifacts(monkeypatch, tmp_path: Path) -> None:
+    _configure_runtime_dir(monkeypatch, tmp_path)
+    state_dir = _configure_context_artifact_paths(monkeypatch, tmp_path)
+
+    orphan_paths = [
+        state_dir / "runtime_state_orphan.json",
+        state_dir / "context_snapshot_orphan.json",
+        state_dir / "runtime_logs_orphan.jsonl",
+        state_dir / "session_state_orphan.json",
+        state_dir / "worker_state_orphan.json",
+    ]
+    for path in orphan_paths:
+        path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(daemon_client, "list_context_ids", lambda: ["orphan"])
+
+    cleaned = daemon_client.cleanup_stale_daemon_states()
+
+    assert "runtime_state_orphan.json" in cleaned["context_files"]
+    assert "context_snapshot_orphan.json" in cleaned["snapshot_files"]
+    assert "runtime_logs_orphan.jsonl" in cleaned["log_files"]
+    assert "session_state_orphan.json" in cleaned["session_files"]
+    assert "worker_state_orphan.json" in cleaned["worker_files"]
+    assert all(not path.exists() for path in orphan_paths)
 
 
 def test_save_daemon_state_uses_atomic_replace(monkeypatch, tmp_path: Path) -> None:

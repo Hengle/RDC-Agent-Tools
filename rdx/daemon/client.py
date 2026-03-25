@@ -13,10 +13,10 @@ from multiprocessing.connection import Client
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-from rdx.context_snapshot import clear_context_snapshot
-from rdx.runtime_state import clear_context_state
+from rdx.context_snapshot import clear_context_snapshot, context_snapshot_path
+from rdx.runtime_state import clear_context_state, context_log_path, context_state_path, list_context_ids
 from rdx.runtime_paths import cli_runtime_dir
-from rdx.runtime_worker_state import clear_worker_state
+from rdx.runtime_worker_state import clear_worker_state, worker_state_path
 
 STATE_DIR = cli_runtime_dir()
 DAEMON_STATE_FILE = STATE_DIR / "daemon_state.json"
@@ -264,6 +264,28 @@ def _state_paths(context: Optional[str] = None) -> Iterable[Path]:
     yield from STATE_DIR.glob("daemon_state*.json")
 
 
+def _remove_file_if_exists(path: Path, cleaned: list[str]) -> None:
+    try:
+        if not path.is_file():
+            return
+    except Exception:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        return
+    cleaned.append(path.name)
+
+
+def _clear_orphan_context_artifacts(context: str, cleaned: Dict[str, list[str]]) -> None:
+    ctx = _normalize_context(context)
+    _remove_file_if_exists(context_state_path(ctx), cleaned["context_files"])
+    _remove_file_if_exists(context_snapshot_path(ctx), cleaned["snapshot_files"])
+    _remove_file_if_exists(context_log_path(ctx), cleaned["log_files"])
+    _remove_file_if_exists(_session_state_path(ctx), cleaned["session_files"])
+    _remove_file_if_exists(worker_state_path(ctx), cleaned["worker_files"])
+
+
 def _is_windows_process_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -424,7 +446,16 @@ def _shutdown_stateful_daemon(pid: int | None, state: Dict[str, Any], context: s
 
 
 def cleanup_stale_daemon_states(context: Optional[str] = None) -> Dict[str, list[str]]:
-    cleaned = {"state_files": [], "session_files": [], "killed_pids": []}
+    cleaned = {
+        "state_files": [],
+        "session_files": [],
+        "killed_pids": [],
+        "context_files": [],
+        "snapshot_files": [],
+        "log_files": [],
+        "worker_files": [],
+    }
+    live_contexts: set[str] = set()
     for path in _state_paths(context):
         status, raw = _load_json_with_status(path)
         ctx = _context_from_state_path(path)
@@ -456,6 +487,16 @@ def cleanup_stale_daemon_states(context: Optional[str] = None) -> Dict[str, list
             clear_worker_state(ctx)
             cleaned["state_files"].append(path.name)
             cleaned["session_files"].append(_session_state_path(ctx).name)
+            continue
+
+        live_contexts.add(ctx)
+
+    if context is None:
+        for ctx in list_context_ids():
+            normalized = _normalize_context(ctx)
+            if normalized in live_contexts:
+                continue
+            _clear_orphan_context_artifacts(normalized, cleaned)
     return cleaned
 
 

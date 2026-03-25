@@ -19,6 +19,15 @@ def test_load_call_args_accepts_args_file_object(tmp_path) -> None:
     assert payload == {"session_id": "sess-002", "projection": {"kind": "tabular"}}
 
 
+def test_load_call_args_accepts_utf8_bom_args_file(tmp_path) -> None:
+    args_file = tmp_path / "args-bom.json"
+    args_file.write_text('{"enable_remote":true}', encoding="utf-8-sig")
+
+    payload = rdx_cli._load_call_args(args_file=str(args_file))
+
+    assert payload == {"enable_remote": True}
+
+
 def test_load_call_args_rejects_args_json_and_args_file_together(tmp_path) -> None:
     args_file = tmp_path / "args.json"
     args_file.write_text('{"session_id":"sess-003"}', encoding="utf-8")
@@ -32,9 +41,32 @@ def test_load_call_args_rejects_invalid_args_json() -> None:
         rdx_cli._load_call_args(args_json='{"session_id": }')
 
 
+def test_load_call_args_recovers_raw_windows_args_json(monkeypatch) -> None:
+    monkeypatch.setattr(
+        rdx_cli,
+        "_recover_args_json_from_command_line",
+        lambda: '{"session_id":"sess-raw","event_id":7,"projection":{"kind":"tabular"}}',
+    )
+
+    payload = rdx_cli._load_call_args(args_json="{session_id:sess-raw,event_id:7,projection:{kind:tabular}}")
+
+    assert payload == {"session_id": "sess-raw", "event_id": 7, "projection": {"kind": "tabular"}}
+
+
 def test_load_call_args_rejects_non_object_args_json() -> None:
     with pytest.raises(ValueError, match=r"--args-json must be a JSON object"):
         rdx_cli._load_call_args(args_json='["sess-004"]')
+
+
+def test_extract_raw_args_json_from_command_line_reads_balanced_payload() -> None:
+    raw = (
+        '"python.exe" cli/run_cli.py call rd.core.init '
+        '--args-json {"session_id":"sess-raw","projection":{"kind":"tabular"}} --format json'
+    )
+
+    extracted = rdx_cli._extract_raw_args_json_from_command_line(raw)
+
+    assert extracted == '{"session_id":"sess-raw","projection":{"kind":"tabular"}}'
 
 
 def test_load_call_args_rejects_missing_args_file(tmp_path) -> None:

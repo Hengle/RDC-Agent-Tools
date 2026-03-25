@@ -5,12 +5,15 @@ import json
 
 from rdx import cli, server
 from rdx.timeout_policy import (
+    DAEMON_RESPONSE_BUFFER_S,
     DEFAULT_DAEMON_REQUEST_TIMEOUT_S,
+    HEAVY_DAEMON_REQUEST_TIMEOUT_S,
     LOCAL_OPEN_REPLAY_TIMEOUT_S,
     REMOTE_CONNECT_DAEMON_BUFFER_S,
     REMOTE_CONNECT_DEFAULT_TIMEOUT_MS,
     REMOTE_OPEN_REPLAY_TIMEOUT_S,
     daemon_exec_timeout_s,
+    worker_exec_timeout_s,
 )
 
 
@@ -28,8 +31,10 @@ class DummyRemoteServer:
         return None
 
 
-def test_daemon_exec_timeout_defaults_to_short_window() -> None:
-    assert daemon_exec_timeout_s("rd.event.get_actions", {"session_id": "sess_demo"}) == DEFAULT_DAEMON_REQUEST_TIMEOUT_S
+def test_daemon_exec_timeout_uses_heavy_window_for_event_queries() -> None:
+    assert daemon_exec_timeout_s("rd.event.get_actions", {"session_id": "sess_demo"}) == (
+        HEAVY_DAEMON_REQUEST_TIMEOUT_S + DAEMON_RESPONSE_BUFFER_S
+    )
 
 
 def test_daemon_exec_timeout_uses_remote_connect_timeout_ms() -> None:
@@ -42,7 +47,7 @@ def test_daemon_exec_timeout_uses_long_window_for_remote_open_replay() -> None:
         "rd.capture.open_replay",
         {"capture_file_id": "capf_demo", "options": {"remote_id": "remote_demo"}},
     )
-    assert timeout_s == REMOTE_OPEN_REPLAY_TIMEOUT_S
+    assert timeout_s == REMOTE_OPEN_REPLAY_TIMEOUT_S + DAEMON_RESPONSE_BUFFER_S
 
 
 def test_daemon_exec_timeout_uses_medium_window_for_local_open_replay() -> None:
@@ -50,7 +55,12 @@ def test_daemon_exec_timeout_uses_medium_window_for_local_open_replay() -> None:
         "rd.capture.open_replay",
         {"capture_file_id": "capf_demo", "options": {}},
     )
-    assert timeout_s == LOCAL_OPEN_REPLAY_TIMEOUT_S
+    assert timeout_s == LOCAL_OPEN_REPLAY_TIMEOUT_S + DAEMON_RESPONSE_BUFFER_S
+
+
+def test_worker_exec_timeout_uses_operation_window_without_transport_buffer() -> None:
+    assert worker_exec_timeout_s("rd.event.get_actions", {"session_id": "sess_demo"}) == HEAVY_DAEMON_REQUEST_TIMEOUT_S
+    assert worker_exec_timeout_s("rd.core.get_version", {}) == DEFAULT_DAEMON_REQUEST_TIMEOUT_S
 
 
 def test_cli_daemon_exec_passes_policy_timeout(monkeypatch) -> None:
