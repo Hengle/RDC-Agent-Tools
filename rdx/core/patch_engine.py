@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
 import re
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from rdx.models import (
@@ -196,23 +199,32 @@ class PatchEngine:
                 )
 
             # 3 -- 以最佳可编辑编码进行反汇编
-            encoding, disasm_target = self._get_best_encoding(
-                controller, session_id,
-            )
-            rd = _get_rd()
-            pipeline_obj = rd.ResourceId()
             try:
-                if stage == ShaderStage.CS:
-                    pipeline_obj = pipe.GetComputePipelineObject()
-                else:
-                    pipeline_obj = pipe.GetGraphicsPipelineObject()
-            except Exception:
-                pipeline_obj = rd.ResourceId()
-            source = controller.DisassembleShader(
-                pipeline_obj,
-                refl,
-                disasm_target,
-            )
+                source, encoding, disasm_target, _ = self._resolve_source(
+                    controller,
+                    pipe,
+                    refl,
+                    stage,
+                    session_id,
+                    requested_target=str(patch_spec.source_target or ""),
+                    requested_encoding=str(patch_spec.source_encoding or ""),
+                )
+            except RuntimeError as exc:
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    success=False,
+                    error_message=str(exc),
+                    error_code="shader_disassembly_unavailable",
+                    error_category="runtime",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "requested_target": str(patch_spec.source_target or ""),
+                        "requested_source_encoding": str(patch_spec.source_encoding or ""),
+                    },
+                )
+            rd = _get_rd()
 
             if not source:
                 return PatchResult(
@@ -237,31 +249,83 @@ class PatchEngine:
             ).hexdigest()
             encoding_name = self._encoding_name(encoding)
             messages: List[str] = []
+            if patch_spec.expected_source_hash and patch_spec.expected_source_hash != original_hash:
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    original_shader_hash=original_hash,
+                    success=False,
+                    error_message="Current shader source hash does not match expected_source_hash",
+                    error_code="shader_source_mismatch",
+                    error_category="validation",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "shader_id": _shader_id_str(shader_id),
+                        "expected_source_hash": str(patch_spec.expected_source_hash),
+                        "actual_source_hash": original_hash,
+                        "disassembly_target": str(disasm_target),
+                    },
+                    source_before_text=source,
+                    source_after_text=source,
+                    disassembly_target=str(disasm_target),
+                    encoding=encoding_name,
+                    entry_point=str(getattr(refl, "entryPoint", "") or "main"),
+                )
 
             # 4 -- 顺序应用每个 PatchOp
             modified = source
-            for op in patch_spec.ops:
-                if op.op == "force_full_precision" and ("spirv" in encoding_name or "spv" in encoding_name):
-                    precision_matches = self._collect_spirv_precision_targets(
-                        modified,
-                        op.variables,
+            if patch_spec.source_text:
+                modified = patch_spec.source_text
+                messages.append("Applied source_text replacement.")
+            elif patch_spec.diff_text:
+                try:
+                    modified = self._apply_unified_diff(source, patch_spec.diff_text)
+                except ValueError as exc:
+                    return PatchResult(
+                        patch_id=patch_spec.patch_id,
+                        original_shader_hash=original_hash,
+                        success=False,
+                        error_message=f"Failed to apply diff_text: {exc}",
+                        error_code="shader_patch_diff_failed",
+                        error_category="validation",
+                        error_details={
+                            "event_id": int(event_id),
+                            "stage": stage.value.upper(),
+                            "session_id": str(session_id),
+                            "shader_id": _shader_id_str(shader_id),
+                            "disassembly_target": str(disasm_target),
+                        },
+                        source_before_text=source,
+                        source_after_text=source,
+                        disassembly_target=str(disasm_target),
+                        encoding=encoding_name,
+                        entry_point=str(getattr(refl, "entryPoint", "") or "main"),
                     )
-                    if precision_matches:
-                        matched_lines = ", ".join(
-                            str(line_no) for line_no, _ in precision_matches[:12]
+                messages.append("Applied diff_text replacement.")
+            else:
+                for op in patch_spec.ops:
+                    if op.op == "force_full_precision" and ("spirv" in encoding_name or "spv" in encoding_name):
+                        precision_matches = self._collect_spirv_precision_targets(
+                            modified,
+                            op.variables,
                         )
-                        if len(precision_matches) > 12:
-                            matched_lines = f"{matched_lines}, ..."
-                        messages.append(
-                            f"force_full_precision matched {len(precision_matches)} RelaxedPrecision line(s)"
-                            f" at {matched_lines}",
-                        )
-                    elif op.variables:
-                        messages.append(
-                            "force_full_precision matched no RelaxedPrecision lines for variables: "
-                            + ", ".join(str(item) for item in op.variables),
-                        )
-                modified = self._apply_op(modified, encoding_name, op)
+                        if precision_matches:
+                            matched_lines = ", ".join(
+                                str(line_no) for line_no, _ in precision_matches[:12]
+                            )
+                            if len(precision_matches) > 12:
+                                matched_lines = f"{matched_lines}, ..."
+                            messages.append(
+                                f"force_full_precision matched {len(precision_matches)} RelaxedPrecision line(s)"
+                                f" at {matched_lines}",
+                            )
+                        elif op.variables:
+                            messages.append(
+                                "force_full_precision matched no RelaxedPrecision lines for variables: "
+                                + ", ".join(str(item) for item in op.variables),
+                            )
+                    modified = self._apply_op(modified, encoding_name, op)
 
             if modified == source:
                 logger.warning(
@@ -282,6 +346,7 @@ class PatchEngine:
                     source_after_text=modified,
                     disassembly_target=str(disasm_target),
                     encoding=encoding_name,
+                    entry_point=str(getattr(refl, "entryPoint", "") or "main"),
                 )
 
             # 5 -- 编译修改后的源码
@@ -769,6 +834,244 @@ class PatchEngine:
         if not expr_from:
             return source
         return source.replace(expr_from, expr_to)
+
+    @classmethod
+    def _resolve_source(
+        cls,
+        controller: Any,
+        pipe: Any,
+        refl: Any,
+        stage: ShaderStage,
+        session_id: str,
+        *,
+        requested_target: str = "",
+        requested_encoding: str = "",
+    ) -> Tuple[str, Any, str, bool]:
+        target_name = str(requested_target or "").strip()
+        encoding_name = str(requested_encoding or "").strip().lower()
+        raw_requested = cls._is_raw_spirv_asm_request(target_name, encoding_name)
+
+        rd = _get_rd()
+        pipeline_obj = rd.ResourceId()
+        try:
+            if stage == ShaderStage.CS:
+                pipeline_obj = pipe.GetComputePipelineObject()
+            else:
+                pipeline_obj = pipe.GetGraphicsPipelineObject()
+        except Exception:
+            pipeline_obj = rd.ResourceId()
+
+        if not target_name and not encoding_name:
+            encoding, disasm_target = cls._get_best_encoding(controller, session_id)
+            source = controller.DisassembleShader(pipeline_obj, refl, disasm_target)
+            return str(source or ""), encoding, str(disasm_target), cls._looks_like_raw_spirv_asm(str(source or ""))
+
+        targets = [str(t) for t in controller.GetDisassemblyTargets(True)]
+        supported_encodings = list(controller.GetTargetShaderEncodings())
+
+        if raw_requested:
+            encoding = cls._find_requested_encoding(supported_encodings, encoding_name or "spirvasm")
+            if encoding is None:
+                raise RuntimeError(
+                    "Raw SPIR-V ASM editing requires a replay backend that supports SPIRVAsm source encoding"
+                )
+            raw_target = cls._find_raw_spirv_asm_target(targets)
+            if raw_target:
+                source = controller.DisassembleShader(pipeline_obj, refl, raw_target)
+                if source:
+                    return str(source), encoding, str(raw_target), True
+            source = cls._disassemble_raw_spirv_bytes(refl)
+            if source:
+                return source, encoding, "SPIR-V ASM", True
+            raise RuntimeError(
+                "Raw SPIR-V ASM disassembly is unavailable: no raw SPIR-V target was exposed and external spirv-dis was not found"
+            )
+
+        target = ""
+        if target_name and target_name.lower() != "auto":
+            target = cls._find_matching_target(targets, target_name)
+            if not target:
+                raise RuntimeError(f"Requested disassembly target is unavailable: {target_name}")
+        if not target:
+            _, target = cls._get_best_encoding(controller, session_id)
+        source = controller.DisassembleShader(pipeline_obj, refl, target)
+        if not source:
+            raise RuntimeError(f"Disassembly returned empty source for target '{target}'")
+        encoding = cls._find_requested_encoding(supported_encodings, encoding_name) if encoding_name else None
+        if encoding is None:
+            encoding, _ = cls._get_best_encoding(controller, session_id)
+        return str(source), encoding, str(target), cls._looks_like_raw_spirv_asm(str(source))
+
+    @staticmethod
+    def _is_raw_spirv_asm_request(target: str, encoding: str) -> bool:
+        target_key = str(target or "").strip().lower().replace("_", " ").replace("-", " ")
+        encoding_key = str(encoding or "").strip().lower().replace("_", "")
+        if encoding_key == "spirvasm":
+            return True
+        if not target_key:
+            return False
+        return target_key in {"spirv asm", "spir v asm", "spirvdis", "spirv dis", "spir v dis"} or (
+            "spir" in target_key and ("asm" in target_key or "dis" in target_key)
+        )
+
+    @staticmethod
+    def _find_matching_target(targets: List[str], requested_target: str) -> str:
+        requested = str(requested_target or "").strip().lower()
+        for target in targets:
+            if str(target).strip().lower() == requested:
+                return str(target)
+        return ""
+
+    @staticmethod
+    def _find_raw_spirv_asm_target(targets: List[str]) -> str:
+        for target in targets:
+            lowered = str(target).strip().lower()
+            if "spir" not in lowered:
+                continue
+            if "renderdoc" in lowered:
+                continue
+            if "asm" in lowered or "dis" in lowered or lowered == "spir-v":
+                return str(target)
+        return ""
+
+    @classmethod
+    def _find_requested_encoding(
+        cls,
+        encodings: List[Any],
+        requested_encoding: str,
+    ) -> Optional[Any]:
+        normalized = str(requested_encoding or "").strip().lower().replace("_", "")
+        if not normalized:
+            return None
+        aliases = {
+            "spirvasm": {"spirvasm", "spirvdis"},
+            "hlsl": {"hlsl"},
+            "glsl": {"glsl"},
+            "dxbc": {"dxbc"},
+            "dxil": {"dxil"},
+            "slang": {"slang"},
+        }
+        wanted = aliases.get(normalized, {normalized})
+        for item in encodings:
+            item_name = cls._encoding_name(item).replace("_", "")
+            if item_name in wanted:
+                return item
+        return None
+
+    @staticmethod
+    def _looks_like_raw_spirv_asm(source: str) -> bool:
+        text = str(source or "")
+        if not text:
+            return False
+        return "OpCapability" in text or "OpDecorate" in text or text.lstrip().startswith("; SPIR-V")
+
+    @staticmethod
+    def _disassemble_raw_spirv_bytes(refl: Any) -> str:
+        raw_bytes = getattr(refl, "rawBytes", None)
+        if raw_bytes is None:
+            return ""
+        try:
+            payload = bytes(raw_bytes)
+        except Exception:
+            try:
+                payload = raw_bytes.tobytes()
+            except Exception:
+                return ""
+        tool = shutil.which("spirv-dis") or shutil.which("spirv-dis.exe")
+        if not tool:
+            return ""
+        runtime_dir = Path(__file__).resolve().parents[2] / "intermediate" / "runtime" / "rdx_cli" / "patch_engine"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"spirv_{uuid.uuid4().hex[:10]}"
+        source_path = runtime_dir / f"{stem}.spv"
+        output_path = runtime_dir / f"{stem}.spvasm"
+        try:
+            source_path.write_bytes(payload)
+            proc = subprocess.run(
+                [tool, str(source_path), "--raw-id", "-o", str(output_path)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            if proc.returncode != 0:
+                logger.warning(
+                    "spirv-dis failed with exit code %s: %s",
+                    proc.returncode,
+                    (proc.stderr or proc.stdout or "").strip(),
+                )
+                return ""
+            return output_path.read_text(encoding="utf-8")
+        finally:
+            for path in (source_path, output_path):
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _apply_unified_diff(source: str, diff_text: str) -> str:
+        if not diff_text.strip():
+            return source
+        source_lines = source.splitlines(keepends=True)
+        diff_lines = diff_text.splitlines(keepends=True)
+        result: List[str] = []
+        source_index = 0
+        line_index = 0
+        current_hunk = False
+
+        def lines_match(source_line: str, diff_payload: str) -> bool:
+            if source_line == diff_payload:
+                return True
+            return source_line.rstrip("\r\n") == diff_payload.rstrip("\r\n")
+
+        while line_index < len(diff_lines):
+            line = diff_lines[line_index]
+            if line.startswith("---") or line.startswith("+++"):
+                line_index += 1
+                continue
+            if not line.startswith("@@"):
+                raise ValueError(f"Unsupported diff header line: {line.rstrip()}")
+            match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+            if match is None:
+                raise ValueError(f"Malformed diff hunk header: {line.rstrip()}")
+            old_start = int(match.group(1))
+            while source_index < old_start - 1 and source_index < len(source_lines):
+                result.append(source_lines[source_index])
+                source_index += 1
+            line_index += 1
+            current_hunk = True
+            while line_index < len(diff_lines):
+                diff_line = diff_lines[line_index]
+                if diff_line.startswith("@@"):
+                    break
+                if diff_line.startswith("\\ No newline at end of file"):
+                    line_index += 1
+                    continue
+                if not diff_line:
+                    line_index += 1
+                    continue
+                marker = diff_line[0]
+                payload = diff_line[1:]
+                if marker == " ":
+                    if source_index >= len(source_lines) or not lines_match(source_lines[source_index], payload):
+                        raise ValueError("Diff context does not match the current shader source")
+                    result.append(source_lines[source_index])
+                    source_index += 1
+                elif marker == "-":
+                    if source_index >= len(source_lines) or not lines_match(source_lines[source_index], payload):
+                        raise ValueError("Diff removal does not match the current shader source")
+                    source_index += 1
+                elif marker == "+":
+                    result.append(payload)
+                else:
+                    raise ValueError(f"Unsupported diff marker: {marker}")
+                line_index += 1
+
+        if not current_hunk:
+            raise ValueError("Unified diff did not contain any hunk")
+        result.extend(source_lines[source_index:])
+        return "".join(result)
 
     # ------------------------------------------------------------------
     # Encoding selection（编码选择）

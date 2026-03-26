@@ -331,6 +331,11 @@ class PatchSpec(BaseModel):
     target_shader_id: str = ""
     intent: str = "fix_naninf"
     ops: List[PatchOp] = Field(default_factory=list)
+    source_text: str = ""
+    diff_text: str = ""
+    source_target: str = ""
+    source_encoding: str = ""
+    expected_source_hash: str = ""
     max_diff_ops: int = 20
     preserve_outputs: bool = True
 

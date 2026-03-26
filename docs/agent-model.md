@@ -100,6 +100,12 @@
   - 真正的 runtime 替换成功。
   - 明确的 capability/runtime 失败。
   - 不应再把任何“逻辑记录已保存但未替换”的状态当成成功。
+- 对 raw `SPIR-V Asm` 调试，优先走显式工作流。
+  - `rd.shader.get_disassembly(target="SPIR-V ASM")`
+  - `rd.shader.edit_and_replace(source_text|diff_text, source_target="SPIR-V ASM", source_encoding="spirvasm", expected_source_hash=...)`
+  - `rd.texture.get_pixel_value` / `rd.export.screenshot` / `rd.macro.shader_hotfix_validate`
+  - `rd.shader.revert_replacement`
+  - 不要把 `force_full_precision` 一类高层 op 当成 raw asm 精确编辑的等价替身。
 - 优先轻量调用。
   - 先获取事件、状态、元数据，再进入导出、diff、debug 等更重的操作。
 - 失败时先看共享契约。

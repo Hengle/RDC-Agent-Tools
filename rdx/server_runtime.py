@@ -6460,6 +6460,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             "source_encoding": requested_encoding_name,
             "supported_source_encodings": supported_encoding_names,
             "messages": str(messages or ""),
+            "compiler_messages": str(messages or ""),
         }
         try:
             entry_points = await _offload(controller.GetShaderEntryPoints, shader_id)
@@ -7005,9 +7006,20 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 resolved_event_id=int(event_id),
             )
         ops_payload = _as_list(args.get("ops"), default=[])
-        if not ops_payload:
+        source_text = str(args.get("source_text") or "")
+        diff_text = str(args.get("diff_text") or "")
+        edit_input_count = sum(
+            1
+            for item in (
+                bool(ops_payload),
+                bool(source_text),
+                bool(diff_text),
+            )
+            if item
+        )
+        if edit_input_count != 1:
             return _err(
-                "rd.shader.edit_and_replace requires a non-empty ops list",
+                "rd.shader.edit_and_replace requires exactly one edit input: ops, source_text, or diff_text",
                 code="validation_error",
                 category="validation",
             )
@@ -7047,6 +7059,11 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 "target_shader_id": shader_id,
                 "intent": str(args.get("intent") or "shader_replace"),
                 "ops": ops_payload,
+                "source_text": source_text,
+                "diff_text": diff_text,
+                "source_target": str(args.get("source_target") or ""),
+                "source_encoding": str(args.get("source_encoding") or ""),
+                "expected_source_hash": str(args.get("expected_source_hash") or ""),
                 "max_diff_ops": _as_int(args.get("max_diff_ops"), 20),
                 "preserve_outputs": _as_bool(args.get("preserve_outputs"), True),
             }
@@ -7338,15 +7355,54 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     refl["constant_blocks"].append({"name": str(getattr(cb, "name", "")), "byte_size": int(getattr(cb, "byteSize", 0))})
             return _ok(reflection=refl, shader_id=shader_id, resolved_event_id=int(event_id))
         if action == "get_disassembly":
-            targets = await _offload(controller.GetDisassemblyTargets, True)
-            target = str(args.get("target", "auto"))
-            if target == "auto":
-                target = targets[0] if targets else ""
-            if not target:
-                return _ok(disassembly="", target="", shader_id=shader_id, resolved_event_id=int(event_id))
-            pipeline_obj = await _offload(pipe.GetComputePipelineObject) if stage == "cs" else await _offload(pipe.GetGraphicsPipelineObject)
-            text = await _offload(controller.DisassembleShader, pipeline_obj, reflection, target)
-            return _ok(disassembly=str(text), target=target, shader_id=shader_id, resolved_event_id=int(event_id))
+            requested_target = str(args.get("target", "auto"))
+            requested_encoding = str(args.get("source_encoding") or "")
+            try:
+                text, resolved_encoding, resolved_target, is_raw_spirv_asm = await _offload(
+                    PatchEngine._resolve_source,
+                    controller,
+                    pipe,
+                    reflection,
+                    ShaderStage(stage),
+                    session_id,
+                    requested_target=requested_target if requested_target != "auto" else "",
+                    requested_encoding=requested_encoding,
+                )
+            except RuntimeError as exc:
+                return _err(
+                    str(exc),
+                    code="shader_disassembly_unavailable",
+                    category="runtime",
+                    details={
+                        "session_id": session_id,
+                        "resolved_event_id": int(event_id),
+                        "shader_id": shader_id,
+                        "requested_target": requested_target,
+                        "requested_source_encoding": requested_encoding,
+                    },
+                )
+            source_encoding_name = _shader_encoding_name(resolved_encoding)
+            if PatchEngine._is_raw_spirv_asm_request(requested_target, requested_encoding) or bool(is_raw_spirv_asm):
+                source_encoding_name = "spirvasm"
+            if not text:
+                return _ok(
+                    disassembly="",
+                    target=str(resolved_target or ""),
+                    source_encoding=source_encoding_name,
+                    is_raw_spirv_asm=bool(is_raw_spirv_asm),
+                    shader_id=shader_id,
+                    resolved_event_id=int(event_id),
+                    source_hash="",
+                )
+            return _ok(
+                disassembly=str(text),
+                target=str(resolved_target or ""),
+                source_encoding=source_encoding_name,
+                is_raw_spirv_asm=bool(is_raw_spirv_asm),
+                shader_id=shader_id,
+                resolved_event_id=int(event_id),
+                source_hash=hashlib.sha256(str(text).encode("utf-8")).hexdigest(),
+            )
 
     return _err(f"Unsupported shader action: {action}")
 
@@ -8850,12 +8906,15 @@ async def _dispatch_vfs(action: str, args: Dict[str, Any]) -> str:
 
 async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
     if action == "connect":
-        _require(args, "host")
-        host = str(args["host"] or "").strip()
-        port = _as_int(args.get("port"), 38920)
-        timeout_ms = remote_connect_timeout_ms(args)
         options = _as_dict(args.get("options"), default={})
         transport = str(options.get("transport") or "renderdoc").strip().lower() or "renderdoc"
+        host = str(args.get("host") or "").strip()
+        if transport != "adb_android" and not host:
+            _require(args, "host")
+        if not host:
+            host = "127.0.0.1"
+        port = _as_int(args.get("port"), 38920)
+        timeout_ms = remote_connect_timeout_ms(args)
         if not _runtime.enable_remote:
             return _capability_error(
                 "remote_disabled",

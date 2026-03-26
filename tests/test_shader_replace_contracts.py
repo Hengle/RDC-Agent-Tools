@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 from types import SimpleNamespace
 
@@ -281,6 +282,63 @@ def test_edit_and_replace_can_emit_patch_artifacts(monkeypatch: pytest.MonkeyPat
     assert replacement["artifacts"]["source_before"]["saved_path"].endswith("_before.txt")
     assert replacement["artifacts"]["source_after"]["saved_path"].endswith("_after.txt")
     assert replacement["artifacts"]["patch_diff"]["saved_path"].endswith("_diff.diff")
+
+
+def test_edit_and_replace_accepts_source_text_workflow_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_engine = _FakePatchEngine(success=True)
+    session_manager = _FakeSessionManager()
+    _install_shader_replace_env(monkeypatch, _SupportedController())
+    server.server_runtime._patch_engine = patch_engine
+    server.server_runtime._session_manager = session_manager
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "edit_and_replace",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 101,
+                    "stage": "ps",
+                    "source_text": "OpCapability Shader\n",
+                    "source_target": "SPIR-V ASM",
+                    "source_encoding": "spirvasm",
+                    "expected_source_hash": "hash_demo",
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    patch_spec = patch_engine.calls[0]["patch_spec"]
+    assert getattr(patch_spec, "source_text") == "OpCapability Shader\n"
+    assert getattr(patch_spec, "source_target") == "SPIR-V ASM"
+    assert getattr(patch_spec, "source_encoding") == "spirvasm"
+    assert getattr(patch_spec, "expected_source_hash") == "hash_demo"
+    assert getattr(patch_spec, "ops") == []
+
+
+def test_edit_and_replace_rejects_multiple_edit_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_shader_replace_env(monkeypatch, _SupportedController())
+    server.server_runtime._patch_engine = _FakePatchEngine(success=True)
+    server.server_runtime._session_manager = _FakeSessionManager()
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "edit_and_replace",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 101,
+                    "stage": "ps",
+                    "ops": [{"op": "replace_expr", "expr_from": "a", "expr_to": "b"}],
+                    "source_text": "OpCapability Shader\n",
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "validation_error"
 
 
 def test_revert_replacement_refreshes_remote_session_when_last_patch_is_removed(
@@ -661,6 +719,134 @@ def test_patch_engine_skips_build_and_replace_when_patch_is_noop(monkeypatch: py
     assert controller.replace_calls == []
 
 
+def test_patch_engine_supports_source_text_replacement(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_get_best_encoding",
+        staticmethod(lambda controller, session_id: ("SPIRVAsm", "SPIR-V (RenderDoc)")),
+    )
+
+    controller = _PatchEngineController()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_demo",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                source_text="OpCapability Shader\nOpEntryPoint Fragment %main_changed \"main\"\n",
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert controller.build_calls
+    assert controller.build_calls[0][2] == b"OpCapability Shader\nOpEntryPoint Fragment %main_changed \"main\"\n"
+
+
+def test_patch_engine_supports_diff_text_replacement(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_get_best_encoding",
+        staticmethod(lambda controller, session_id: ("SPIRVAsm", "SPIR-V (RenderDoc)")),
+    )
+
+    controller = _PatchEngineController()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+    before = "OpEntryPoint Fragment %main \"main\""
+    after = "OpEntryPoint Fragment %main_changed \"main\""
+    diff_text = "".join(
+        difflib.unified_diff(
+            [before + "\n"],
+            [after + "\n"],
+            fromfile="before",
+            tofile="after",
+        )
+    )
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_demo",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                diff_text=diff_text,
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert controller.build_calls[0][2] == (after + "\n").encode("utf-8")
+
+
+def test_patch_engine_reports_source_hash_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_get_best_encoding",
+        staticmethod(lambda controller, session_id: ("SPIRVAsm", "SPIR-V (RenderDoc)")),
+    )
+
+    controller = _PatchEngineController()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_demo",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                source_text="OpCapability Shader\n",
+                expected_source_hash="mismatch",
+            ),
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "shader_source_mismatch"
+    assert result.error_category == "validation"
+    assert controller.build_calls == []
+
+
 def test_apply_precision_patch_supports_renderdoc_spirv_relaxedprecision_annotations() -> None:
     source = (
         'float3 _213 = CompositeConstruct({_1192, _1192, _1192}) : [[RelaxedPrecision]];\n'
@@ -782,3 +968,34 @@ def test_revert_patch_rebinds_target_event(monkeypatch: pytest.MonkeyPatch) -> N
     assert result.success is True
     assert asyncio.run(engine.revert_patch("sess_demo", "repl_demo", session_manager)) is True
     assert controller.set_frame_event_calls[-1] == (314, True)
+
+
+def test_get_disassembly_reports_raw_spirv_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_shader_replace_env(monkeypatch, _SupportedController())
+    server.server_runtime._session_manager = _FakeSessionManager()
+
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_resolve_source",
+        classmethod(lambda cls, controller, pipe, refl, stage, session_id, **kwargs: ("OpCapability Shader\n", "SPIRVAsm", "SPIR-V ASM", True)),
+    )
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "get_disassembly",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 101,
+                    "stage": "ps",
+                    "target": "SPIR-V ASM",
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["target"] == "SPIR-V ASM"
+    assert payload["source_encoding"] == "spirvasm"
+    assert payload["is_raw_spirv_asm"] is True
+    assert payload["source_hash"]

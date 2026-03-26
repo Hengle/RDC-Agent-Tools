@@ -330,6 +330,20 @@ daemon 退出后，本地与可恢复 remote session 默认都会保留在持久
   - hair 采样点
   - face / torso / background 采样点
   - `rd.export.screenshot`
+
+### raw `SPIR-V Asm` 工作流什么时候该用
+
+如果你在 `qrenderdoc` 里走的是 `FS -> Edit -> Decompile with spirv-dis -> Apply changes` 这条链，优先改成下面这套 `rdx-tools` 顺序：
+
+- 先用 `rd.shader.get_disassembly(target="SPIR-V ASM")` 拿 raw asm，并记录返回的 `source_hash`。
+- 然后在本地按整段 `source_text` 或 unified `diff_text` 做编辑，不要先把精确 raw asm 改写成 `force_full_precision` 一类高层 op。
+- 再用 `rd.shader.edit_and_replace(source_text|diff_text, source_target="SPIR-V ASM", source_encoding="spirvasm", expected_source_hash=...)` 应用补丁。
+- 如果返回 `shader_source_mismatch`，说明当前 replay session 中的 shader 文本已经变了；应先重新抓取 disassembly，而不是继续复用旧 patch。
+- 如果返回 `shader_patch_diff_failed`，说明 unified diff 与当前 shader 文本基线不一致；先对齐 before artifact，再重新生成 diff。
+- `emit_patch_artifacts=true` 或 `output_dir=...` 时，运行时会把改前文本、改后文本和 diff 一起导出，便于和手工 `qrenderdoc` patch 逐项比对。
+- 对 Android remote Vulkan 样本，raw asm 精确 patch 成功并不等价于“这组 decoration 就是正确修复”。像 `EventID 1248` 这类 case，删除单个 `OpDecorate ... RelaxedPrecision` 也可能让 hair / face / background 一起掉成 `0`；因此 raw asm bisect 必须配套多点采样与稳定 revert，而不是只看单个 hair 像素。
+
+这条 raw asm 编辑链解决的是“精确 IR patch / apply / revert”问题；它不等价于 `qrenderdoc` 主视窗的最终 framebuffer 观察链。若当前 `rd.export.screenshot` 的 frame-end auto target 与 UI 主视图不一致，应单独把它当成 framebuffer 观察问题排查，不要和 raw asm 编辑能力混为一谈。
 - 如果多个不相关采样点一起掉成 `0,0,0,0`，应把它判断为“当前 patch 把整个输出面打坏了”，而不是“已经得到正确黑发效果”。
 
 当前在 `WhiteHair.rdc / EventID 1248 / ResourceId::208592` 上，已知现象是：

@@ -177,6 +177,59 @@ def test_dispatch_remote_connect_failure_does_not_allocate_remote_id(monkeypatch
         server._runtime.enable_remote = original_enable_remote
 
 
+def test_dispatch_remote_connect_allows_omitting_host_for_adb_android(monkeypatch) -> None:
+    original_remotes = dict(server._runtime.remotes)
+    original_enable_remote = server._runtime.enable_remote
+
+    async def _inline_offload(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_wait_for_remote_endpoint", lambda url, timeout_ms: None)
+    monkeypatch.setattr(server.server_runtime, "_create_remote_server_connection", lambda url: DummyRemoteServer())
+    monkeypatch.setattr(
+        server.server_runtime,
+        "bootstrap_android_remote",
+        lambda remote_port, options: SimpleNamespace(host="127.0.0.1", port=39920, serial="e38b8019"),
+    )
+    monkeypatch.setattr(
+        server.server_runtime,
+        "describe_android_remote",
+        lambda result: {"serial": "e38b8019", "endpoint": f"{result.host}:{result.port}"},
+    )
+
+    server._runtime.remotes.clear()
+    server._runtime.enable_remote = True
+    clear_context_snapshot()
+    server._runtime.context_snapshots.clear()
+    try:
+        payload = json.loads(
+            asyncio.run(
+                server._dispatch_remote(
+                    "connect",
+                    {
+                        "options": {
+                            "transport": "adb_android",
+                            "device_serial": "e38b8019",
+                        },
+                        "timeout_ms": 1000,
+                    },
+                )
+            )
+        )
+        assert payload["success"] is True
+        assert payload["detail"]["transport"] == "adb_android"
+        assert payload["detail"]["endpoint"] == "127.0.0.1:39920"
+        remote_id = payload["remote_id"]
+        assert server._runtime.remotes[remote_id].requested_host == "127.0.0.1"
+    finally:
+        clear_context_snapshot()
+        server._runtime.context_snapshots.clear()
+        server._runtime.remotes.clear()
+        server._runtime.remotes.update(original_remotes)
+        server._runtime.enable_remote = original_enable_remote
+
+
 def test_dispatch_capture_open_replay_keeps_live_remote_handle(monkeypatch) -> None:
     original_session_manager = server.server_runtime._session_manager
     original_captures = dict(server._runtime.captures)

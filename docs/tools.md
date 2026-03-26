@@ -108,6 +108,10 @@
 - `rd.shader.edit_and_replace` 现在要么执行真实 runtime shader replacement，要么返回明确的 capability/runtime 失败；不再允许 `mock_applied` 一类伪成功。
 - `rd.shader.edit_and_replace` 在编译阶段会传入真实 `ShaderCompileFlags` 对象；若编译失败、`BuildTargetShader` 绑定失败或 `ReplaceResource` 失败，错误会通过结构化 `error.code/details` 暴露，而不是全部折叠成同一种失败。
 - `rd.shader.edit_and_replace` 现在支持 `emit_patch_artifacts` 与 `output_dir`，可直接导出改前 IR、改后 IR 与 unified diff，便于对照手工 `qrenderdoc` patch 流程。
+- `rd.shader.get_disassembly` 现在把 raw `SPIR-V Asm` 当成一等能力：当 `target="SPIR-V ASM"` 时，会优先返回 raw asm；返回中会显式包含 `source_encoding`、`is_raw_spirv_asm` 与 `source_hash`，便于后续做 optimistic guard。
+- `rd.shader.edit_and_replace` 现在支持三种互斥编辑输入：`ops`、`source_text`、`diff_text`。raw asm 推荐工作流是 `rd.shader.get_disassembly(target="SPIR-V ASM") -> rd.shader.edit_and_replace(source_text|diff_text, source_target="SPIR-V ASM", source_encoding="spirvasm") -> validate -> rd.shader.revert_replacement`。
+- `rd.shader.edit_and_replace` 在 raw asm 工作流下支持 `expected_source_hash`；若当前 shader 文本与调用方预期不一致，会显式返回 `shader_source_mismatch`，避免把过期 patch 打到错误版本上。
+- `rd.shader.compile` 现在把 raw `SPIR-V Asm` 视为正式输入；返回里除 `messages` 外，还会显式给出 `compiler_messages` 与 `supported_source_encodings`，便于上层在 session 能力边界上做 truthful fallback。
 - `force_full_precision` 在 `SPIR-V (RenderDoc)` 目标下会把“本次到底命中了哪些 `RelaxedPrecision` 行”写进 `messages`；若变量没有直接命中任何 `RelaxedPrecision` 行，则会返回 `status="noop"` 并明确说明“matched no RelaxedPrecision lines for variables: ...”。
 - 对 Android remote Vulkan 的手动 IR 调试，不要只看一个采样点；像 `EventID 1248` 这类 shader，`variables=["404"]` 这类高影响补丁可能只命中一行 `RelaxedPrecision`，但会把整个 `ResourceId::208592` 输出面一起打成 `0`。应同时用 `rd.texture.get_pixel_value`、`rd.export.screenshot` 与 `rd.shader.revert_replacement` 交叉验证。
 - 当 `rd.shader.edit_and_replace` 返回 `status="noop"` 时，表示当前 session 中没有创建 live replacement；这时不应再把该 `replacement_id` 当成需要回滚的 active replacement。
@@ -118,6 +122,7 @@
 ## Remote 说明
 
 - `rd.remote.connect` 返回的 `remote_id` 代表 live remote connection；若连接失败，不会返回占位 handle。
+- `rd.remote.connect` 在 `adb_android` transport 下允许省略 `host`；运行时会按 `127.0.0.1` 处理，并以 bootstrap 后的实际 endpoint 为准。
 - `rd.capture.open_replay` 的 remote 入口是 `options.remote_id`，而不是隐式回退到 `localhost`。
 - remote replay 成功后，原 `remote_id` 默认仍保持 live；其 replay-owned lease 会反映在 `rd.session.get_context -> remote.active_session_ids`。
 - 当 live remote handle 仍被 lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；不要把这种情况误判成 endpoint 丢失。
