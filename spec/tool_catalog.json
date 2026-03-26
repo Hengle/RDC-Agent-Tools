@@ -4421,7 +4421,7 @@
       "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
       "description": "读取当前 context 快照与持久化状态索引，返回 runtime、remote、focus、session 表、恢复信息、最近操作与限制配置。",
       "parameter_raw": "context_id (str, optional): choose the context to use; defaults to the current daemon context",
-      "returns_raw": "ok (bool)<br>data (dict): {context_id, entry_mode, backend, runtime_parallelism_ceiling, runtime, remote, focus, last_artifacts, current_session_id, sessions, recovery, limits, active_operation, recent_operations, runtime_owner, owner_lease, active_baton, rehydrate_status, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, entry_mode, backend, runtime_parallelism_ceiling, session_locator, runtime, remote, focus, last_artifacts, current_session_id, sessions, recovery, limits, active_operation, recent_operations, runtime_owner, owner_lease, active_baton, rehydrate_status, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
       "param_names": [
         "context_id"
       ],
@@ -4495,7 +4495,7 @@
       "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
       "description": "List all known daemon contexts with current session, owner lease, entry/backend and baton status.",
       "parameter_raw": "context_id (str, optional): choose the context to use; defaults to the current daemon context",
-      "returns_raw": "ok (bool)<br>data (dict): {context_id, contexts: [{context_id, entry_mode, backend, runtime_parallelism_ceiling, runtime_owner, owner_lease, active_baton, rehydrate_status, current_session_id, current_capture_file_id, session_count, capture_count, updated_at_ms}]}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, contexts: [{context_id, entry_mode, backend, runtime_parallelism_ceiling, session_locator, runtime_owner, owner_lease, active_baton, rehydrate_status, current_session_id, current_capture_file_id, session_count, capture_count, updated_at_ms}]}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
       "param_names": [
         "context_id"
       ],
@@ -4559,7 +4559,7 @@
       "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
       "description": "Export the current live debugging surface into a runtime baton artifact for cross-agent, cross-turn or reconnect handoff.",
       "parameter_raw": "task_goal (str): what the next executor must prove or falsify<br>context_id (str, optional): choose the context to use; defaults to the current daemon context",
-      "returns_raw": "ok (bool)<br>data (dict): {context_id, baton_id, artifact_path, entry_mode, backend, runtime_owner, owner_lease, active_baton, rehydrate_status, baton}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, baton_id, artifact_path, entry_mode, backend, session_locator, runtime_owner, owner_lease, active_baton, rehydrate_status, baton}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
       "param_names": [
         "task_goal",
         "context_id"

@@ -23,6 +23,7 @@ def test_session_context_update_and_get_round_trip() -> None:
         assert get_payload["ok"] is True
         assert get_payload["data"]["focus"]["pixel"] == {"x": 12, "y": 34}
         assert get_payload["data"]["runtime_parallelism_ceiling"] == "multi_context_multi_owner"
+        assert get_payload["data"]["session_locator"] == {"rdc_path": "", "session_id": "", "frame_index": 0, "active_event_id": 0}
 
         invalid_payload = asyncio.run(
             server.dispatch_operation("rd.session.update_context", {"key": "session_id", "value": "sess_demo"}, transport="test")

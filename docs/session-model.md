@@ -106,6 +106,8 @@ remote endpoint
 
 - `runtime_parallelism_ceiling` 只描述 transport/runtime 层的能力上限。
 - local ceiling 为 `multi_context_multi_owner`，remote ceiling 固定为 `single_runtime_owner`。
+- Frameworks may consume local ceiling as concurrent_team or staged_handoff orchestrated multi-context; Tools does not choose the platform coordination policy.
+- session_locator only aligns rdc_path/session_id/frame_index/active_event_id for correlation and rehydrate hints; it is not a stable cross-process handle.
 - 这不等于所有宿主都能并发多 live owners；平台是否允许 team-style coordination 由上层 Frameworks 决定。
 
 ## 3. `CLI capture open` 实际做了什么

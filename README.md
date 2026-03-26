@@ -35,7 +35,8 @@
 - `rd.texture.get_data` 的默认语义是数值 readback 容器，不是图片导出。
 - 需要直接打开的纹理图片时，统一使用 `rd.export.texture`。
 - `runtime_mode_truth.json` 只定义 transport/runtime ceiling，不定义平台是否具备 team agents。
-- local multi-context 是 runtime ceiling，不等于所有宿主都能升格成 `concurrent_team`。
+- local multi-context ? runtime ceiling????????????? `concurrent_team`??????? Frameworks ??? `staged_handoff` ?? orchestrated multi-context?
+- Tools ????? ceiling???? local ceiling ?? `staged_handoff` ? agent ???? context?? `concurrent_team` ? team-agents ???? Frameworks ???????
 
 ## 规范源优先级
 
@@ -135,6 +136,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - 现已公开 `rd.session.create_context`、`rd.session.list_contexts`、`rd.session.select_context`、`rd.session.clear_context`，把 multi-context 变成正式 public surface，而不是 CLI 侧隐式约定。
 - 现已公开 `rd.session.claim_runtime_owner` / `rd.session.release_runtime_owner`；当 context 已 claim owner 时，live `rd.*` 调用必须提供匹配的 `runtime_owner` 与 `owner_lease_id`，否则返回 `runtime_owner_conflict`。
 - 现已公开 `rd.session.export_runtime_baton` / `rd.session.rehydrate_runtime_baton`；跨 agent、跨轮次与重连恢复的 live handoff 现在有了正式 baton surface。
+- `rd.session.get_context` / `rd.session.list_contexts` / `rd.session.export_runtime_baton` ???? `session_locator` ??????? `rdc_path`?`session_id`?`frame_index` ? `active_event_id`??????? handle ????????
 - daemon 退出或重启后，平台会优先按持久化索引恢复本地与可恢复 remote session，并尽量复用原 `session_id`；只有 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失时，才会把该 session 标记为 `degraded` 并返回明确错误。
 - `rd.remote.connect` 与 `rd.capture.open_replay` 在 daemon / streamable transports 下会更新结构化 progress；如宿主不支持 push，至少应通过 `daemon status` 读取 `active_operation`。
 - `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。

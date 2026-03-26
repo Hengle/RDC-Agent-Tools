@@ -80,9 +80,11 @@
 - 若 context 已 claim runtime owner，live `rd.*` 调用必须带匹配的 `runtime_owner` 与 `owner_lease_id`；拿不到匹配 lease 时应先停，不要继续猜测执行。
 - `rd.session.get_context` / `rd.session.list_contexts` 返回的 `runtime_parallelism_ceiling` 只表示 runtime 上限，不表示宿主已经具备 team-agent coordination。
 - local ceiling 可到 `multi_context_multi_owner`，但是否真的能用成并行 live specialists，取决于上层 Frameworks 的平台矩阵。
+- Frameworks may map local ceiling to concurrent_team or staged_handoff orchestrated multi-context; Tools does not choose the host coordination policy.
 - 对 daemon 重启后的本地链路，优先读取恢复面。
 - 本地与可恢复 remote session 都可通过 `rd.session.get_context` / `rd.session.resume` 自动或显式恢复。
 - 跨 agent / 跨轮次需要传递 live 调试上下文时，优先导出 runtime baton，而不是只转述 `session_id`、`remote_id` 或 `active_event_id`。
+- session_locator from get_context/list_contexts/export_runtime_baton is only a correlation hint, not a stable cross-process handle.
   - 若 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失，运行时会显式返回 `degraded` / error；这时再重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
 - 先用 discovery 接口，再决定注入多少 tool 描述。
   - `rd.core.list_tools` 适合按 `namespace`、`group`、`capability`、`role` 做结构化枚举。

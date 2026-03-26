@@ -74,12 +74,14 @@ def test_context_lifecycle_tools_round_trip() -> None:
     assert default_snapshot["data"]["context_id"] == "default"
     assert default_snapshot["data"]["notes"] == ""
     assert default_snapshot["data"]["runtime_parallelism_ceiling"] == "multi_context_multi_owner"
+    assert default_snapshot["data"]["session_locator"] == {"rdc_path": "", "session_id": "", "frame_index": 0, "active_event_id": 0}
 
     listed = asyncio.run(server.dispatch_operation("rd.session.list_contexts", {}, transport="test"))
     assert listed["ok"] is True
     context_ids = {item["context_id"] for item in listed["data"]["contexts"]}
     assert {"default", "ctx-alpha"} <= context_ids
     assert all(item["runtime_parallelism_ceiling"] == "multi_context_multi_owner" for item in listed["data"]["contexts"])
+    assert all("session_locator" in item for item in listed["data"]["contexts"])
 
     selected = asyncio.run(
         server.dispatch_operation(
@@ -188,6 +190,10 @@ def test_runtime_baton_export_and_rehydrate_round_trip(monkeypatch: pytest.Monke
     artifact_path = Path(exported["data"]["artifact_path"])
     assert baton_id
     assert artifact_path.is_file()
+    assert exported["data"]["session_locator"]["rdc_path"] == str(capture_path)
+    assert exported["data"]["session_locator"]["session_id"] == "sess_baton"
+    assert exported["data"]["session_locator"]["active_event_id"] == 77
+    assert exported["data"]["baton"]["session_locator"]["rdc_path"] == str(capture_path)
 
     calls: list[tuple[str, str]] = []
 
@@ -218,3 +224,23 @@ def test_runtime_mode_truth_declares_runtime_ceiling_only() -> None:
     assert modes["remote_daemon"]["runtime_parallelism_ceiling"] == "single_runtime_owner"
     assert modes["remote_mcp"]["runtime_parallelism_ceiling"] == "single_runtime_owner"
     assert modes["remote_mcp"]["host_coordination_gate"] == "frameworks_platform_matrix_applies"
+
+
+def test_docs_and_catalog_distinguish_runtime_ceiling_from_platform_coordination() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    readme = (repo_root / "README.md").read_text(encoding="utf-8-sig")
+    session_doc = (repo_root / "docs" / "session-model.md").read_text(encoding="utf-8-sig")
+    agent_doc = (repo_root / "docs" / "agent-model.md").read_text(encoding="utf-8-sig")
+    catalog = json.loads((repo_root / "spec" / "tool_catalog.json").read_text(encoding="utf-8-sig"))
+    tools = {item["name"]: item for item in catalog.get("tools") or []}
+
+    assert "staged_handoff" in readme
+    assert "orchestrated multi-context" in readme
+    assert "session_locator" in readme
+    assert "staged_handoff" in session_doc
+    assert "session_locator" in session_doc
+    assert "session_locator" in agent_doc
+    assert "orchestrated multi-context" in agent_doc
+    assert "session_locator" in tools["rd.session.get_context"]["returns_raw"]
+    assert "session_locator" in tools["rd.session.list_contexts"]["returns_raw"]
+    assert "session_locator" in tools["rd.session.export_runtime_baton"]["returns_raw"]

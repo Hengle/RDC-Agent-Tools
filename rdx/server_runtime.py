@@ -4460,6 +4460,27 @@ def _runtime_baton_artifact_path(baton_id: str) -> Path:
     return artifacts_dir() / "runtime_batons" / f"{str(baton_id or '').strip()}.json"
 
 
+def _session_locator_projection(snapshot: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = dict(snapshot.get("runtime") or {})
+    sessions = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
+    captures = state.get("captures") if isinstance(state.get("captures"), dict) else {}
+    current_session_id = str(state.get("current_session_id") or runtime.get("session_id") or "").strip()
+    session = dict(sessions.get(current_session_id) or {}) if isinstance(sessions, dict) else {}
+    current_capture_file_id = str(
+        state.get("current_capture_file_id")
+        or session.get("capture_file_id")
+        or runtime.get("capture_file_id")
+        or ""
+    ).strip()
+    capture = dict(captures.get(current_capture_file_id) or {}) if isinstance(captures, dict) else {}
+    return {
+        "rdc_path": str(session.get("rdc_path") or capture.get("file_path") or capture.get("rdc_path") or "").strip(),
+        "session_id": current_session_id,
+        "frame_index": _as_int(runtime.get("frame_index"), _as_int(session.get("frame_index"), 0)),
+        "active_event_id": _as_int(runtime.get("active_event_id"), _as_int(session.get("active_event_id"), 0)),
+    }
+
+
 def _context_summary(context_id: str) -> Dict[str, Any]:
     ctx = normalize_context_id(context_id)
     snapshot = _context_snapshot(ctx)
@@ -4473,6 +4494,7 @@ def _context_summary(context_id: str) -> Dict[str, Any]:
         "owner_lease": dict(snapshot.get("owner_lease") or {}),
         "active_baton": dict(snapshot.get("active_baton") or {}),
         "rehydrate_status": dict(snapshot.get("rehydrate_status") or {}),
+        "session_locator": _session_locator_projection(snapshot, state),
         "current_session_id": str(state.get("current_session_id") or ""),
         "current_capture_file_id": str(state.get("current_capture_file_id") or ""),
         "session_count": len(state.get("sessions") or {}),
@@ -4609,6 +4631,7 @@ def _build_runtime_baton(context_id: str, *, task_goal: str, baton_id: str = "")
             "capture_file_id": current_capture_file_id,
             "session_id": current_session_id,
         },
+        "session_locator": _session_locator_projection(snapshot, state),
         "rehydrate": {
             "required": True,
             "remote_connect": remote_connect,
@@ -4770,6 +4793,7 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
             active_operation = {}
         return _ok(
             **snapshot,
+            session_locator=_session_locator_projection(snapshot, state),
             current_session_id=str(state.get("current_session_id") or ""),
             sessions=list(state.get("sessions", {}).values()),
             recovery=dict(state.get("recovery") or {}),
@@ -4935,6 +4959,7 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
             owner_lease=dict(payload.get("owner_lease") or {}),
             entry_mode=str(payload.get("entry_mode") or "cli"),
             backend=str(payload.get("backend") or "local"),
+            session_locator=dict(payload.get("session_locator") or {}),
             active_baton=dict((payload.get("snapshot") or {}).get("active_baton") or {}),
             rehydrate_status=dict((payload.get("snapshot") or {}).get("rehydrate_status") or {}),
             baton=payload,
