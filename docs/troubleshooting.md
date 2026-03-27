@@ -391,12 +391,12 @@ daemon 退出后，本地与可恢复 remote session 默认都会保留在持久
 
 ### Android remote / `SPIR-V (RenderDoc)` 的手动 IR patch 怎么排
 
-如果目标是像 `EventID 1248` 这类 Android remote Vulkan shader，建议按这个顺序看：
+如果目标是 Android remote Vulkan shader，建议按这个顺序看：
 
 - 先用 `rd.shader.get_disassembly` 确认目标变量在当前 `SPIR-V (RenderDoc)` 文本里是否真的带有 `[[RelaxedPrecision]]`。
 - 再用 `rd.shader.edit_and_replace` 的 `messages` 看这次 `force_full_precision` 到底命中了哪几行。
 - 如果返回 `status="noop"`，而且 `messages` 里写着 `matched no RelaxedPrecision lines for variables: ...`，说明这个变量在当前反汇编里没有直接可移除的 `RelaxedPrecision` 行；继续盲目回滚或复打同一个 patch 没意义。
-- 如果返回 `status="applied"`，但 `messages` 只命中极少数行，例如 `matched 1 RelaxedPrecision line(s) at 1488`，不要默认这就等价于“把这个概念变量整体提升到 full precision”；它只说明当前文本 patch 只改到了那一行。
+- 如果返回 `status="applied"`，但 `messages` 只命中极少数行，不要默认这就等价于“把这个概念变量整体提升到 full precision”；它只说明当前文本 patch 只改到了那几行。
 - 对高影响 patch，不要只看单个 hair 像素。应同时取：
   - hair 采样点
   - face / torso / background 采样点
@@ -412,17 +412,16 @@ daemon 退出后，本地与可恢复 remote session 默认都会保留在持久
 - 如果返回 `shader_source_mismatch`，说明当前 replay session 中的 shader 文本已经变了；应先重新抓取 disassembly，而不是继续复用旧 patch。
 - 如果返回 `shader_patch_diff_failed`，说明 unified diff 与当前 shader 文本基线不一致；先对齐 before artifact，再重新生成 diff。
 - `emit_patch_artifacts=true` 或 `output_dir=...` 时，运行时会把改前文本、改后文本和 diff 一起导出，便于和手工 `qrenderdoc` patch 逐项比对。
-- 对 Android remote Vulkan 样本，raw asm 精确 patch 成功并不等价于“这组 decoration 就是正确修复”。像 `EventID 1248` 这类 case，删除单个 `OpDecorate ... RelaxedPrecision` 也可能让 hair / face / background 一起掉成 `0`；因此 raw asm bisect 必须配套多点采样与稳定 revert，而不是只看单个 hair 像素。
+- 对 Android remote Vulkan 样本，raw asm 精确 patch 成功并不等价于“这组 decoration 就是正确修复”。删除单个 `OpDecorate ... RelaxedPrecision` 也可能让多个不相关区域一起掉成 `0`；因此 raw asm bisect 必须配套多点采样与稳定 revert，而不是只看单个像素。
 
 这条 raw asm 编辑链解决的是“精确 IR patch / apply / revert”问题；它不等价于 `qrenderdoc` 主视窗的最终 framebuffer 观察链。若当前 `rd.export.screenshot` 的 frame-end auto target 与 UI 主视图不一致，应单独把它当成 framebuffer 观察问题排查，不要和 raw asm 编辑能力混为一谈。
 - 如果多个不相关采样点一起掉成 `0,0,0,0`，应把它判断为“当前 patch 把整个输出面打坏了”，而不是“已经得到正确黑发效果”。
 
-当前在 `WhiteHair.rdc / EventID 1248 / ResourceId::208592` 上，已知现象是：
+泛化判断规则如下：
 
-- `variables=["493"]`
-  - 当前会是 direct `noop`，因为没有直接命中 `RelaxedPrecision` 行。
-- `variables=["404"]`
-  - 当前会命中第 `1488` 行，但可能把整张输出面一起打成 `0`。
+- 若 `force_full_precision` 返回 `status="noop"`，说明当前目标变量在现有反汇编文本里没有直接可移除的 `RelaxedPrecision` 行；这时继续对同一变量盲目复打同类 patch 没有意义。
+- 若 `force_full_precision` 返回 `status="applied"`，但只命中极少数 `RelaxedPrecision` 行，说明当前 patch 仅改动了局部文本位置，不应直接推断为“相关精度问题已经被正确修复”。
+- 若 patch 后多个不相关采样点与截图一起异常变黑或掉成 `0`，应优先判断为“当前 patch 破坏了输出面”，而不是把它当成目标现象已被正确修复。
 
 ## `rd.shader.debug_start` 拿到的 event 不可信
 

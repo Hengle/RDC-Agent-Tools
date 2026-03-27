@@ -125,7 +125,7 @@
 - `rd.shader.edit_and_replace` 在 raw asm 工作流下支持 `expected_source_hash`；若当前 shader 文本与调用方预期不一致，会显式返回 `shader_source_mismatch`，避免把过期 patch 打到错误版本上。
 - `rd.shader.compile` 现在把 raw `SPIR-V Asm` 视为正式输入；返回里除 `messages` 外，还会显式给出 `compiler_messages`、`supported_source_encodings`、`runtime_replacement_supported` 与 `runtime_replacement_reason`，便于上层把“compile 可用”和“runtime replacement 可用”分开判断。
 - `force_full_precision` 在 `SPIR-V (RenderDoc)` 目标下会把“本次到底命中了哪些 `RelaxedPrecision` 行”写进 `messages`；若变量没有直接命中任何 `RelaxedPrecision` 行，则会返回 `status="noop"` 并明确说明“matched no RelaxedPrecision lines for variables: ...”。
-- 对 Android remote Vulkan 的手动 IR 调试，不要只看一个采样点；像 `EventID 1248` 这类 shader，`variables=["404"]` 这类高影响补丁可能只命中一行 `RelaxedPrecision`，但会把整个 `ResourceId::208592` 输出面一起打成 `0`。应同时用 `rd.texture.get_pixel_value`、`rd.export.screenshot` 与 `rd.shader.revert_replacement` 交叉验证。
+- 对 Android remote Vulkan 的手动 IR 调试，不要只看单个采样点。高影响补丁即使只命中极少数 `RelaxedPrecision` 行，也可能把整个输出面一起打成 `0`。应同时用 `rd.texture.get_pixel_value`、`rd.export.screenshot` 与 `rd.shader.revert_replacement` 交叉验证。
 - 当 `rd.shader.edit_and_replace` 返回 `status="noop"` 时，表示当前 session 中没有创建 live replacement；这时不应再把该 `replacement_id` 当成需要回滚的 active replacement。
 - `rd.shader.debug_start` 只在请求 event 的真实 debug 上下文可用时成功；如果只能跨 event 或 synthetic 回退，运行时会显式失败。
 - `rd.shader.debug_start` 在 remote replay 下会先读取 `remote_capability_matrix`；如果当前 backend/session 明确不支持 shader debug，会在创建 trace 前直接 truthful-fail。
