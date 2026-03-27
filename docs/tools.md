@@ -107,6 +107,8 @@
 - `rd.event.get_actions` 与 `rd.event.get_action_tree` 现在默认走有界返回，并通过 `pagination` 暴露是否截断；大 capture 下不再默认一次性物化整棵事件树。
 - `rd.pipeline.*` 的同次调用内，snapshot 与 live pipeline 读取共享同一个已解析 event 上下文，不允许前后错位。
 - event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 与 `rd.shader.debug_start` 会返回 `resolved_event_id`；如果 backend 不能精确绑定请求 event，必须显式失败，不允许 silent fallback。
+- `rd.pipeline.get_state` / `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` 会返回 truth/degrade 元数据，至少区分 `summary_status`、`summary_degraded_reasons`、`binding_truth_level` 与 `evidence_truth_level`。
+- `rd.texture.get_data` / `rd.texture.get_pixel_value` / `rd.export.screenshot` 也会带 `resolved_event_id`、target metadata 与 truth/degrade 标记；readback 或 screenshot 看起来“有结果”不等于绑定真相已验证。
 - `rd.resource.get_usage` / `rd.resource.get_history` 会同时暴露：
   - canonical `event_id`
   - `raw_event_id`
@@ -116,16 +118,17 @@
 ## Shader 替换与调试口径
 
 - `rd.shader.edit_and_replace` 现在要么执行真实 runtime shader replacement，要么返回明确的 capability/runtime 失败；不再允许 `mock_applied` 一类伪成功。
-- `rd.shader.edit_and_replace` 在编译阶段会传入真实 `ShaderCompileFlags` 对象；若编译失败、`BuildTargetShader` 绑定失败或 `ReplaceResource` 失败，错误会通过结构化 `error.code/details` 暴露，而不是全部折叠成同一种失败。
+- `rd.shader.edit_and_replace` 在编译阶段会传入真实 `ShaderCompileFlags` 对象；错误会显式区分 `shader_binding_lookup_failed`、`shader_stage_mismatch`、`shader_source_mismatch`、`shader_patch_diff_failed`、`shader_build_failed`、`shader_replace_backend_unsupported` 与 `shader_replace_failed`，并在 `error.details` 中带 `failure_stage` / `failure_reason`。
 - `rd.shader.edit_and_replace` 现在支持 `emit_patch_artifacts` 与 `output_dir`，可直接导出改前 IR、改后 IR 与 unified diff，便于对照手工 `qrenderdoc` patch 流程。
 - `rd.shader.get_disassembly` 现在把 raw `SPIR-V Asm` 当成一等能力：当 `target="SPIR-V ASM"` 时，会优先返回 raw asm；返回中会显式包含 `source_encoding`、`is_raw_spirv_asm` 与 `source_hash`，便于后续做 optimistic guard。
 - `rd.shader.edit_and_replace` 现在支持三种互斥编辑输入：`ops`、`source_text`、`diff_text`。raw asm 推荐工作流是 `rd.shader.get_disassembly(target="SPIR-V ASM") -> rd.shader.edit_and_replace(source_text|diff_text, source_target="SPIR-V ASM", source_encoding="spirvasm") -> validate -> rd.shader.revert_replacement`。
 - `rd.shader.edit_and_replace` 在 raw asm 工作流下支持 `expected_source_hash`；若当前 shader 文本与调用方预期不一致，会显式返回 `shader_source_mismatch`，避免把过期 patch 打到错误版本上。
-- `rd.shader.compile` 现在把 raw `SPIR-V Asm` 视为正式输入；返回里除 `messages` 外，还会显式给出 `compiler_messages` 与 `supported_source_encodings`，便于上层在 session 能力边界上做 truthful fallback。
+- `rd.shader.compile` 现在把 raw `SPIR-V Asm` 视为正式输入；返回里除 `messages` 外，还会显式给出 `compiler_messages`、`supported_source_encodings`、`runtime_replacement_supported` 与 `runtime_replacement_reason`，便于上层把“compile 可用”和“runtime replacement 可用”分开判断。
 - `force_full_precision` 在 `SPIR-V (RenderDoc)` 目标下会把“本次到底命中了哪些 `RelaxedPrecision` 行”写进 `messages`；若变量没有直接命中任何 `RelaxedPrecision` 行，则会返回 `status="noop"` 并明确说明“matched no RelaxedPrecision lines for variables: ...”。
 - 对 Android remote Vulkan 的手动 IR 调试，不要只看一个采样点；像 `EventID 1248` 这类 shader，`variables=["404"]` 这类高影响补丁可能只命中一行 `RelaxedPrecision`，但会把整个 `ResourceId::208592` 输出面一起打成 `0`。应同时用 `rd.texture.get_pixel_value`、`rd.export.screenshot` 与 `rd.shader.revert_replacement` 交叉验证。
 - 当 `rd.shader.edit_and_replace` 返回 `status="noop"` 时，表示当前 session 中没有创建 live replacement；这时不应再把该 `replacement_id` 当成需要回滚的 active replacement。
 - `rd.shader.debug_start` 只在请求 event 的真实 debug 上下文可用时成功；如果只能跨 event 或 synthetic 回退，运行时会显式失败。
+- `rd.shader.debug_start` 在 remote replay 下会先读取 `remote_capability_matrix`；如果当前 backend/session 明确不支持 shader debug，会在创建 trace 前直接 truthful-fail。
 - `rd.shader.debug_start` 失败时会保留 `failure_stage` / `failure_reason`、`attempts`、`pixel_history_summary` 与 `resolved_context`，用于区分 target 配置失败、cross-event only、invalid trace 或 debugger handle 缺失。
 - `rd.export.shader_bundle` 会按请求 `event_id` 导出，并把 `requested_event_id` / `resolved_event_id` 一起写入 bundle。
 
@@ -134,12 +137,14 @@
 - `rd.remote.connect` 返回的 `remote_id` 代表 live remote connection；若连接失败，不会返回占位 handle。
 - `rd.remote.connect` 在 `adb_android` transport 下允许省略 `host`；运行时会按 `127.0.0.1` 处理，并以 bootstrap 后的实际 endpoint 为准。
 - `rd.capture.open_replay` 的 remote 入口是 `options.remote_id`，而不是隐式回退到 `localhost`。
+- 一旦传入 `options.remote_id`，运行时就只能走该 remote backend；`remote_id` 缺失、失效、跨 context 复用或会导致 local fallback 时，必须直接失败。
 - remote replay 成功后，原 `remote_id` 默认仍保持 live；其 replay-owned lease 会反映在 `rd.session.get_context -> remote.active_session_ids`。
 - 当 live remote handle 仍被 lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；不要把这种情况误判成 endpoint 丢失。
 - `remote_handle_consumed` 只应出现在旧 tombstone / 显式 consumed state 恢复路径，不再是正常成功链路的默认语义。
 - daemon / worker 重启后，平台会优先基于持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据缺失时，才会显式进入 `degraded` / error。
 - `rd.remote.connect` 与 `rd.capture.open_replay` 会更新结构化 progress；daemon 路径下应通过 `daemon status/get_state -> active_operation` 读取统一状态面。
 - `rd.remote.connect` 的 `options` 参数面在 `CLI` / daemon / `MCP` 下保持一致。
+- `rd.session.get_context` 与 `rd.core.get_capabilities` 会暴露 `remote_capability_matrix`、`remote_context_locality`、`remote_handle_origin_context` 与 `remote_handle_reuse_policy`；Framework remote gate 应只消费这组底层真相。
 - `rd.shader.compile` 现在接受可选 `session_id` 与 `source_encoding`；不同 replay backend 的 `supported_source_encodings` 可能不同。
 - `rd.remote.set_overlay_options` 在当前 `RenderDoc` Python binding 未暴露 overlay RPC 时，会显式返回 `remote_overlay_options_unavailable`。
 

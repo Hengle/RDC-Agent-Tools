@@ -181,6 +181,48 @@ class PatchEngine:
             shader_id = pipe.GetShader(rd_stage)
             refl = pipe.GetShaderReflection(rd_stage)
 
+            if shader_id is None or _shader_id_str(shader_id) in {"", "0", "ResourceId::0"}:
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    success=False,
+                    error_message=(
+                        f"No shader bound at stage {stage.value} "
+                        f"for event {event_id}"
+                    ),
+                    error_code="shader_binding_lookup_failed",
+                    error_category="runtime",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "failure_stage": "resolve_binding",
+                        "failure_reason": "stage_unbound",
+                        "expected_shader_id": str(patch_spec.target_shader_id or ""),
+                        "bound_shader_id": _shader_id_str(shader_id),
+                    },
+                )
+
+            if patch_spec.target_shader_id and _shader_id_str(shader_id) != str(patch_spec.target_shader_id):
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    success=False,
+                    error_message=(
+                        "Current event binding does not match the expected shader identity "
+                        f"for stage {stage.value}"
+                    ),
+                    error_code="shader_binding_lookup_failed",
+                    error_category="runtime",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "failure_stage": "resolve_binding",
+                        "failure_reason": "shader_id_mismatch",
+                        "expected_shader_id": str(patch_spec.target_shader_id or ""),
+                        "bound_shader_id": _shader_id_str(shader_id),
+                    },
+                )
+
             if refl is None:
                 return PatchResult(
                     patch_id=patch_spec.patch_id,
@@ -195,6 +237,10 @@ class PatchEngine:
                         "event_id": int(event_id),
                         "stage": stage.value.upper(),
                         "session_id": str(session_id),
+                        "failure_stage": "resolve_binding",
+                        "failure_reason": "reflection_unavailable",
+                        "expected_shader_id": str(patch_spec.target_shader_id or ""),
+                        "bound_shader_id": _shader_id_str(shader_id),
                     },
                 )
 
@@ -222,6 +268,10 @@ class PatchEngine:
                         "session_id": str(session_id),
                         "requested_target": str(patch_spec.source_target or ""),
                         "requested_source_encoding": str(patch_spec.source_encoding or ""),
+                        "failure_stage": "disassembly",
+                        "failure_reason": "source_unavailable",
+                        "expected_shader_id": str(patch_spec.target_shader_id or ""),
+                        "bound_shader_id": _shader_id_str(shader_id),
                     },
                 )
             rd = _get_rd()
@@ -241,6 +291,10 @@ class PatchEngine:
                         "stage": stage.value.upper(),
                         "session_id": str(session_id),
                         "disassembly_target": str(disasm_target),
+                        "failure_stage": "disassembly",
+                        "failure_reason": "empty_source",
+                        "expected_shader_id": str(patch_spec.target_shader_id or ""),
+                        "bound_shader_id": _shader_id_str(shader_id),
                     },
                 )
 
@@ -265,6 +319,8 @@ class PatchEngine:
                         "expected_source_hash": str(patch_spec.expected_source_hash),
                         "actual_source_hash": original_hash,
                         "disassembly_target": str(disasm_target),
+                        "failure_stage": "validate_source",
+                        "failure_reason": "source_hash_mismatch",
                     },
                     source_before_text=source,
                     source_after_text=source,
@@ -295,6 +351,8 @@ class PatchEngine:
                             "session_id": str(session_id),
                             "shader_id": _shader_id_str(shader_id),
                             "disassembly_target": str(disasm_target),
+                            "failure_stage": "apply_patch",
+                            "failure_reason": "diff_apply_failed",
                         },
                         source_before_text=source,
                         source_after_text=source,
@@ -380,6 +438,8 @@ class PatchEngine:
                         "disassembly_target": str(disasm_target),
                         "compile_flags": compile_flag_payload,
                         "exception_type": type(exc).__name__,
+                        "failure_stage": "build",
+                        "failure_reason": "build_runtime_error",
                     },
                     messages=messages,
                 )
@@ -406,6 +466,8 @@ class PatchEngine:
                             "disassembly_target": str(disasm_target),
                             "compile_flags": compile_flag_payload,
                             "compiler_output": str(errors),
+                            "failure_stage": "build",
+                            "failure_reason": "compiler_failed",
                         },
                         messages=messages,
                         source_before_text=source,
@@ -450,6 +512,8 @@ class PatchEngine:
                         "encoding": encoding_name,
                         "compile_flags": compile_flag_payload,
                         "exception_type": type(exc).__name__,
+                        "failure_stage": "apply_replacement",
+                        "failure_reason": "replace_resource_failed",
                     },
                     messages=messages,
                     source_before_text=source,
@@ -511,6 +575,8 @@ class PatchEngine:
                     "stage": stage.value.upper(),
                     "patch_id": patch_spec.patch_id,
                     "exception_type": type(exc).__name__,
+                    "failure_stage": "runtime",
+                    "failure_reason": type(exc).__name__,
                 },
                 source_before_text=source if 'source' in locals() else "",
                 source_after_text=modified if 'modified' in locals() else "",

@@ -340,18 +340,22 @@ def test_pipeline_dispatch_uses_one_resolved_event_context(monkeypatch: pytest.M
     summary = json.loads(asyncio.run(server._dispatch_pipeline("get_state_summary", {"session_id": "sess_demo"})))
     assert summary["success"] is True
     assert summary["summary"]["render_targets"][0]["resource_id"] == "rt@101"
+    assert summary["summary"]["summary_status"] == "verified"
+    assert summary["summary"]["binding_truth_level"] == "binding_verified"
     assert pipeline_service.snapshot_calls == [101]
 
     _poison_active_event(53)
     render_targets = json.loads(asyncio.run(server._dispatch_pipeline("get_render_targets", {"session_id": "sess_demo"})))
     assert render_targets["success"] is True
     assert render_targets["render_targets"][0]["resource_id"] == "rt@101"
+    assert render_targets["binding_truth_level"] == "binding_verified"
     assert pipeline_service.snapshot_calls == [101, 101]
 
     _poison_active_event(53)
     output_targets = json.loads(asyncio.run(server._dispatch_pipeline("get_output_targets", {"session_id": "sess_demo"})))
     assert output_targets["success"] is True
     assert output_targets["framebuffer"]["depth_target"]["resource_id"] == "depth@101"
+    assert output_targets["framebuffer"]["summary_status"] == "verified"
     assert pipeline_service.snapshot_calls == [101, 101, 101]
 
     _poison_active_event(53)

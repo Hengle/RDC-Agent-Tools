@@ -27,7 +27,7 @@
 - 某些 tool 存在前置依赖，必须先建立 session。
 - 关键状态对象需要跨步骤传递，例如 `capture_file_id`、`session_id`、`event_id`。
 - `capture_file_id`、`session_id` 是运行时句柄，不是长期稳定标识。
-- remote 路径还存在 `remote_id` consumed 生命周期，不能把它当作可无限复用的句柄。
+- remote 路径的 `remote_id` 是 context-local live handle；不能跨 context 复用，也不能把它当作可无限复用的长期句柄。
 - 长链任务如果没有 context snapshot，模型很容易忘记上一轮 focus 与 artifact 路径。
 - 一个 context 现在可以持有多条本地 session 记录；如果 Agent 只记住单个 `session_id`，很容易把“当前选中 session”和“context 持有的全部 session”混为一谈。
 - 不是所有底层 RenderDoc `eventId` 都能回灌到 `rd.event.*`；上层必须区分 canonical `event_id` 与 `raw_event_id`。
@@ -65,6 +65,7 @@
   - 对 `.rdc` 的平台最小链路是 `rd.core.init -> rd.capture.open_file -> rd.capture.open_replay -> rd.replay.set_frame`。
 - 对 remote 路径，先拿到 live `remote_id`。
   - 推荐链路是 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
+  - 一旦显式传入 `options.remote_id`，`rd.capture.open_replay` 就必须严格走该 remote backend；若 `remote_id` 缺失、失效、跨 context 复用或会掉回 local，运行时会直接 hard fail。
   - remote `open_replay` 成功后，原 `remote_id` 默认仍保持 live；不要把它当成已消费 tombstone。
   - live remote handle 的当前 lease 会出现在 `rd.session.get_context -> remote.active_session_ids`。
   - 如果你尝试在 lease 未释放时断开 live remote，预期错误码应为 `remote_handle_in_use`。
@@ -80,11 +81,12 @@
 - 若 context 已 claim runtime owner，live `rd.*` 调用必须带匹配的 `runtime_owner` 与 `owner_lease_id`；拿不到匹配 lease 时应先停，不要继续猜测执行。
 - `rd.session.get_context` / `rd.session.list_contexts` 返回的 `runtime_parallelism_ceiling` 只表示 runtime 上限，不表示宿主已经具备 team-agent coordination。
 - local ceiling 可到 `multi_context_multi_owner`，但是否真的能用成并行 live specialists，取决于上层 Frameworks 的平台矩阵。
-- Frameworks may map local ceiling to concurrent_team or staged_handoff orchestrated multi-context; Tools does not choose the host coordination policy.
+- 上层 Framework 可把 local ceiling 消费成 `concurrent_team` 或 `staged_handoff` 的 orchestrated multi-context，但 Tools 不负责替宿主选择 coordination policy。
+- remote 相关细粒度能力不要再从 ceiling 猜；应读取 `rd.session.get_context -> remote_capability_matrix`，并结合 `remote_context_locality` / `remote_handle_origin_context` / `remote_handle_reuse_policy` 做 gate。
 - 对 daemon 重启后的本地链路，优先读取恢复面。
 - 本地与可恢复 remote session 都可通过 `rd.session.get_context` / `rd.session.resume` 自动或显式恢复。
 - 跨 agent / 跨轮次需要传递 live 调试上下文时，优先导出 runtime baton，而不是只转述 `session_id`、`remote_id` 或 `active_event_id`。
-- session_locator from get_context/list_contexts/export_runtime_baton is only a correlation hint, not a stable cross-process handle.
+- `session_locator`（来自 `rd.session.get_context` / `rd.session.list_contexts` / `rd.session.export_runtime_baton`）只是关联与恢复提示，不是稳定的跨进程 handle。
   - 若 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失，运行时会显式返回 `degraded` / error；这时再重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
 - 先用 discovery 接口，再决定注入多少 tool 描述。
   - `rd.core.list_tools` 适合按 `namespace`、`group`、`capability`、`role` 做结构化枚举。
@@ -97,6 +99,7 @@
   - `rd.resource.get_usage` / `rd.resource.get_history` 返回的 `raw_event_id` 仅用于诊断，不应默认直接传回 `rd.event.*`。
 - 对 event-bound pipeline / shader / texture / export / debug 调用，显式传入 `event_id` 并检查返回中的 `resolved_event_id`。
   - 如果 backend 不支持精确 event-bound debug 或 shader 绑定，运行时现在会显式失败，而不是静默回退到别的 event。
+  - `rd.pipeline.get_state` / `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` / `rd.texture.get_data` / `rd.export.screenshot` 会返回 truth/degrade 元数据；上层应把这些字段当作证据可信度的一部分，而不是只看主 payload 非空。
 - 把 handle 当作短生命周期引用。
   - 上层如需缓存，必须准备重建 session 的恢复路径，而不是把 handle 当成永久主键。
 - 先读 catalog 的 `prerequisites`，再决定 tool 序列。
@@ -107,6 +110,8 @@
   - 真正的 runtime 替换成功。
   - 明确的 capability/runtime 失败。
   - 不应再把任何“逻辑记录已保存但未替换”的状态当成成功。
+- `rd.shader.edit_and_replace` 的失败面现在是分阶段的；应读取 `error.code` 与 `error.details.failure_stage` / `failure_reason`，区分绑定失败、stage mismatch、build failed、apply failed、backend unsupported 与 source hash mismatch。
+- `rd.shader.debug_start` 在 remote replay 下会先检查 capability matrix；若当前 backend/session 明确不支持 shader debug，应该把它当作 truthful fail，而不是继续猜测 trace 创建异常。
 - 对 raw `SPIR-V Asm` 调试，优先走显式工作流。
   - `rd.shader.get_disassembly(target="SPIR-V ASM")`
   - `rd.shader.edit_and_replace(source_text|diff_text, source_target="SPIR-V ASM", source_encoding="spirvasm", expected_source_hash=...)`

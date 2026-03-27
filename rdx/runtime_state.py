@@ -244,6 +244,9 @@ def _normalize_remote_session_record(value: Any) -> Dict[str, Any]:
         "port": _normalize_int(item.get("port")),
         "endpoint": str(item.get("endpoint") or "").strip(),
         "origin_remote_id": str(item.get("origin_remote_id") or "").strip(),
+        "origin_context_id": str(item.get("origin_context_id") or "").strip(),
+        "context_locality": str(item.get("context_locality") or "strict").strip() or "strict",
+        "reuse_policy": str(item.get("reuse_policy") or "must_reconnect").strip() or "must_reconnect",
         "ownership_state": str(item.get("ownership_state") or "session_owned").strip() or "session_owned",
         "device_serial": str(item.get("device_serial") or bootstrap.get("device_serial") or "").strip(),
         "requested": {

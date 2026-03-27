@@ -296,6 +296,11 @@ def test_dispatch_capture_open_replay_keeps_live_remote_handle(monkeypatch) -> N
         assert context_payload["remote"]["state"] == "live_handle"
         assert context_payload["remote"]["origin_remote_id"] == "remote_demo"
         assert context_payload["remote"]["active_session_ids"] == ["sess_demo"]
+        assert context_payload["remote"]["context_locality"] == "strict"
+        assert context_payload["remote"]["reuse_policy"] == "must_reconnect"
+        assert context_payload["remote_handle_origin_context"] == "default"
+        assert context_payload["remote_capability_matrix"]["endpoint"]["status"] == "verified"
+        assert context_payload["remote_capability_matrix"]["fix_verification"]["status"] == "blocked_current_session"
     finally:
         clear_context_snapshot()
         server._runtime.context_snapshots.clear()
@@ -305,6 +310,31 @@ def test_dispatch_capture_open_replay_keeps_live_remote_handle(monkeypatch) -> N
         server._runtime.remotes = original_remotes
         server._runtime.session_owned_remotes = original_session_owned
         server._runtime.consumed_remotes = original_consumed
+
+
+def test_remote_handle_reuse_across_contexts_fails(monkeypatch) -> None:
+    original_remotes = dict(server._runtime.remotes)
+    token = server.server_runtime._CURRENT_CONTEXT_ID.set("ctx_b")
+    server._runtime.remotes = {
+        "remote_demo": server.RemoteHandle(
+            remote_id="remote_demo",
+            host="127.0.0.1",
+            port=38960,
+            connected=True,
+            origin_context_id="ctx_a",
+            transport="adb_android",
+            remote_server=DummyRemoteServer(),
+        )
+    }
+    try:
+        payload = json.loads(asyncio.run(server._dispatch_remote("ping", {"remote_id": "remote_demo"})))
+        assert payload["success"] is False
+        assert payload["code"] == "remote_handle_context_mismatch"
+        assert payload["details"]["origin_context_id"] == "ctx_a"
+        assert payload["details"]["current_context_id"] == "ctx_b"
+    finally:
+        server.server_runtime._CURRENT_CONTEXT_ID.reset(token)
+        server._runtime.remotes = original_remotes
 
 
 def test_consumed_remote_handle_reports_lifecycle_error() -> None:

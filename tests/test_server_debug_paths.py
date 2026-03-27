@@ -152,6 +152,40 @@ def test_debug_start_returns_structured_error_details(monkeypatch) -> None:
     assert controller.debug_calls[0] == {"x": 3, "y": 4, "sample": 7, "view": 8, "primitive": 9}
 
 
+def test_debug_start_rejects_unsupported_mode_with_structured_validation_error(monkeypatch) -> None:
+    controller = _FakeController([])
+    _install_debug_env(monkeypatch, controller, [])
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "debug_start",
+                {
+                    "session_id": "sess_test",
+                    "mode": "compute",
+                    "event_id": 11,
+                    "params": {
+                        "group_x": 0,
+                        "group_y": 0,
+                        "group_z": 0,
+                        "thread_x": 0,
+                        "thread_y": 0,
+                        "thread_z": 0,
+                    },
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "validation_error"
+    assert payload["category"] == "validation"
+    assert payload["details"]["failure_stage"] == "mode_validation"
+    assert payload["details"]["failure_reason"] == "debug_mode_unsupported"
+    assert payload["details"]["requested_mode"] == "compute"
+    assert payload["details"]["supported_modes"] == ["pixel"]
+
+
 def test_debug_start_rejects_cross_event_fallback(monkeypatch) -> None:
     controller = _FakeController([_FakeTrace(valid=False), _FakeTrace(valid=False), _FakeTrace(valid=False)])
     _install_debug_env(monkeypatch, controller, [_FakeHistoryItem(17, 0)])

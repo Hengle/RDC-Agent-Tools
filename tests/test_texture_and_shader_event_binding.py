@@ -126,9 +126,12 @@ def test_texture_event_bound_tools_respect_explicit_event_id(monkeypatch: pytest
     assert pixel_payload["success"] is True
     assert pixel_payload["resolved_event_id"] == 314
     assert pixel_payload["pixel"]["event_id"] == 314
+    assert pixel_payload["texture_id"] == "ResourceId::178817"
+    assert pixel_payload["binding_truth_level"] == "binding_degraded"
     assert stats_payload["success"] is True
     assert stats_payload["resolved_event_id"] == 314
     assert stats_payload["stats"]["event_id"] == 314
+    assert stats_payload["texture_id"] == "ResourceId::178817"
     assert seen_events == [314, 314]
 
 
@@ -235,6 +238,8 @@ def test_texture_get_data_defaults_to_npz_container(monkeypatch: pytest.MonkeyPa
     assert payload["content_kind"] == "texture_readback_container"
     assert payload["artifact_path"].endswith(".npz")
     assert payload["saved_path"].endswith(".npz")
+    assert payload["texture_id"] == "ResourceId::178817"
+    assert payload["binding_truth_level"] == "binding_degraded"
 
 
 def test_texture_get_data_rejects_non_npz_output_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

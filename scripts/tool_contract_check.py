@@ -77,6 +77,8 @@ SESSION_REFRESH_TOOLS = {
     "rd.macro.shader_hotfix_validate",
     "rd.session.select_session",
     "rd.session.resume",
+    "rd.session.export_runtime_baton",
+    "rd.session.rehydrate_runtime_baton",
 }
 FORCED_REMOTE_SKIP_TOOLS = {
     "rd.remote.list_targets",
@@ -217,6 +219,7 @@ def _scope_skip_classification(
     transport_scope: str,
 ) -> tuple[str, str, str, str, str, str] | None:
     lower_msg = str(message or "").lower()
+    haystack = " ".join([str(code or ""), str(message or "")]).lower()
     details = _payload_error_details(payload)
     capability = str(details.get("capability") or "").strip().lower()
     optional = bool(details.get("optional", False))
@@ -320,6 +323,19 @@ def _scope_skip_classification(
             code or "sample_compatibility",
             "sample_compatibility",
             "Keep dependent shader debug tools as scope_skip when a debug trace cannot be created",
+            "only affects shader debug chain",
+        )
+
+    if tool == "rd.shader.debug_start" and (
+        "precise event-bound shader debug is unavailable" in lower_msg
+        or "shader_debug_event_binding_unavailable" in haystack
+    ):
+        return (
+            "scope_skip",
+            message or "precise event-bound shader debug unavailable for this sample/backend",
+            code or "shader_debug_event_binding_unavailable",
+            "sample_compatibility",
+            "Keep precise shader debug limits as scope_skip when the requested sample/backend cannot establish an exact debug trace",
             "only affects shader debug chain",
         )
 
@@ -485,6 +501,11 @@ def _prepare_artifacts(root: Path) -> dict[str, Path]:
 class SampleState:
     matrix: str
     rdc_path: Path
+    context_id: str = ""
+    runtime_owner: str = ""
+    owner_lease_id: str | None = None
+    active_baton_id: str | None = None
+    active_baton_path: str | None = None
     session_id: str | None = None
     capture_file_id: str | None = None
     live_remote_id: str | None = None
@@ -651,9 +672,12 @@ async def _ensure_live_remote_handle(call_fn: Any, state: SampleState, *, timeou
     state.remote_error_code = ""
     state.remote_reason = ""
     state.remote_issue_type = "remote_endpoint"
+    connect_args = _remote_connect_args()
+    if state.context_id:
+        connect_args["context_id"] = state.context_id
     remote_payload, remote_raw, remote_exc = await call_fn(
         "rd.remote.connect",
-        _remote_connect_args(),
+        connect_args,
         timeout_s=timeout_s,
     )
     if remote_payload and remote_payload.get("ok"):
@@ -669,7 +693,10 @@ async def _ensure_live_remote_handle(call_fn: Any, state: SampleState, *, timeou
 
         ping_payload, ping_raw, ping_exc = await call_fn(
             "rd.remote.ping",
-            {"remote_id": state.live_remote_id},
+            {
+                "remote_id": state.live_remote_id,
+                **({"context_id": state.context_id} if state.context_id else {}),
+            },
             timeout_s=10.0,
         )
         if not (ping_payload and ping_payload.get("ok")):
@@ -713,6 +740,18 @@ async def _ensure_context(
         timeout_s=25.0,
     )
 
+    if state.context_id:
+        await call_fn(
+            "rd.session.create_context",
+            {"new_context_id": state.context_id, "context_id": state.context_id},
+            timeout_s=15.0,
+        )
+        await call_fn(
+            "rd.session.select_context",
+            {"target_context_id": state.context_id, "context_id": state.context_id},
+            timeout_s=15.0,
+        )
+
     if use_remote_replay:
         await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
         if not state.live_remote_id:
@@ -727,7 +766,11 @@ async def _ensure_context(
             open_replay_options["remote_id"] = state.live_remote_id
         payload, _, _ = await call_fn(
             "rd.capture.open_replay",
-            {"capture_file_id": state.capture_file_id, "options": open_replay_options},
+            {
+                "capture_file_id": state.capture_file_id,
+                "options": open_replay_options,
+                **({"context_id": state.context_id} if state.context_id else {}),
+            },
             timeout_s=35.0,
         )
         if payload and payload.get("ok"):
@@ -765,12 +808,41 @@ async def _ensure_context(
         state.debug_target = {}
         state.debug_params = {}
 
-        await call_fn("rd.replay.set_frame", {"session_id": state.session_id, "frame_index": 0}, timeout_s=20.0)
+        await call_fn(
+            "rd.replay.set_frame",
+            {
+                "session_id": state.session_id,
+                "frame_index": 0,
+                **({"context_id": state.context_id} if state.context_id else {}),
+            },
+            timeout_s=20.0,
+        )
+        active_payload, _, _ = await call_fn(
+            "rd.event.get_active",
+            {
+                "session_id": state.session_id,
+                **({"context_id": state.context_id} if state.context_id else {}),
+            },
+            timeout_s=10.0,
+        )
+        if active_payload and active_payload.get("ok"):
+            try:
+                active_event_id = int(_payload_data(active_payload).get("active_event_id") or 0)
+            except Exception:
+                active_event_id = 0
+            if active_event_id > 0:
+                state.event_id = active_event_id
 
         draw_candidates: list[dict[str, Any]] = []
         actions_payload, _, _ = await call_fn(
             "rd.event.get_actions",
-            {"session_id": state.session_id, "include_markers": True, "include_drawcalls": True, "max_nodes": 512},
+            {
+                "session_id": state.session_id,
+                "include_markers": True,
+                "include_drawcalls": True,
+                "max_nodes": 512,
+                **({"context_id": state.context_id} if state.context_id else {}),
+            },
             timeout_s=20.0,
         )
         if actions_payload and actions_payload.get("ok"):
@@ -779,6 +851,30 @@ async def _ensure_context(
                 fallback_event, draw_candidates = _pick_representative_action_context(actions)
                 if state.event_id <= 0 and fallback_event > 0:
                     state.event_id = fallback_event
+
+        candidate_event_ids: list[int] = []
+        for candidate in draw_candidates:
+            try:
+                candidate_event = int(candidate.get("event_id") or 0)
+            except Exception:
+                candidate_event = 0
+            if candidate_event > 0 and candidate_event not in candidate_event_ids:
+                candidate_event_ids.append(candidate_event)
+        if int(state.event_id or 0) > 0 and int(state.event_id) not in candidate_event_ids:
+            candidate_event_ids.insert(0, int(state.event_id))
+        for candidate_event in candidate_event_ids[:64]:
+            details_payload, _, _ = await call_fn(
+                "rd.event.get_action_details",
+                {
+                    "session_id": state.session_id,
+                    "event_id": candidate_event,
+                    **({"context_id": state.context_id} if state.context_id else {}),
+                },
+                timeout_s=15.0,
+            )
+            if details_payload and details_payload.get("ok"):
+                state.event_id = candidate_event
+                break
 
         for candidate in draw_candidates[:1024]:
             candidate_event = int(candidate.get("event_id") or 0)
@@ -791,12 +887,20 @@ async def _ensure_context(
                 continue
             await call_fn(
                 "rd.event.set_active",
-                {"session_id": state.session_id, "event_id": candidate_event},
+                {
+                    "session_id": state.session_id,
+                    "event_id": candidate_event,
+                    **({"context_id": state.context_id} if state.context_id else {}),
+                },
                 timeout_s=20.0,
             )
             shader_probe, _, _ = await call_fn(
                 "rd.pipeline.get_shader",
-                {"session_id": state.session_id, "stage": "ps"},
+                {
+                    "session_id": state.session_id,
+                    "stage": "ps",
+                    **({"context_id": state.context_id} if state.context_id else {}),
+                },
                 timeout_s=20.0,
             )
             if not (shader_probe and shader_probe.get("ok")):
@@ -816,13 +920,17 @@ async def _ensure_context(
         if state.event_id > 0:
             await call_fn(
                 "rd.event.set_active",
-                {"session_id": state.session_id, "event_id": int(state.event_id)},
+                {
+                    "session_id": state.session_id,
+                    "event_id": int(state.event_id),
+                    **({"context_id": state.context_id} if state.context_id else {}),
+                },
                 timeout_s=20.0,
             )
 
         tx_payload, _, _ = await call_fn(
             "rd.resource.list_textures",
-            {"session_id": state.session_id},
+            {"session_id": state.session_id, **({"context_id": state.context_id} if state.context_id else {})},
             timeout_s=20.0,
         )
         if tx_payload and tx_payload.get("ok"):
@@ -838,7 +946,7 @@ async def _ensure_context(
 
         bu_payload, _, _ = await call_fn(
             "rd.resource.list_buffers",
-            {"session_id": state.session_id},
+            {"session_id": state.session_id, **({"context_id": state.context_id} if state.context_id else {})},
             timeout_s=20.0,
         )
         if bu_payload and bu_payload.get("ok"):
@@ -848,7 +956,11 @@ async def _ensure_context(
 
         sh_payload, _, _ = await call_fn(
             "rd.pipeline.get_shader",
-            {"session_id": state.session_id, "stage": "ps"},
+            {
+                "session_id": state.session_id,
+                "stage": "ps",
+                **({"context_id": state.context_id} if state.context_id else {}),
+            },
             timeout_s=20.0,
         )
         if sh_payload and sh_payload.get("ok"):
@@ -1004,6 +1116,10 @@ def _default_for_id(param: str, state: SampleState) -> Any:
         state.capture_id or (state.known_capture_ids[-1] if state.known_capture_ids else "")
     ).strip() or None
     known = {
+        "context_id": str(state.context_id or "").strip() or None,
+        "runtime_owner": str(state.runtime_owner or "").strip() or None,
+        "owner_lease_id": str(state.owner_lease_id or "").strip() or None,
+        "baton_id": str(state.active_baton_id or "").strip() or None,
         "session_id": preferred_session_id,
         "capture_file_id": preferred_capture_file_id,
         "resource_id": state.resource_id or state.texture_id,
@@ -1134,12 +1250,60 @@ def _track_tool_side_effects(
             _remember_session_handle(state, session_id)
         return
 
+    if tool == "rd.session.claim_runtime_owner":
+        lease = data.get("owner_lease")
+        if isinstance(lease, dict):
+            lease_id = str(lease.get("lease_id") or "").strip()
+            if lease_id:
+                state.owner_lease_id = lease_id
+        runtime_owner = data.get("runtime_owner")
+        if isinstance(runtime_owner, dict):
+            agent_id = str(runtime_owner.get("agent_id") or "").strip()
+            if agent_id:
+                state.runtime_owner = agent_id
+        return
+
+    if tool == "rd.session.release_runtime_owner":
+        state.owner_lease_id = None
+        return
+
+    if tool == "rd.session.export_runtime_baton":
+        baton_id = str(data.get("baton_id") or "").strip()
+        if baton_id:
+            state.active_baton_id = baton_id
+        artifact_path = str(data.get("artifact_path") or "").strip()
+        if artifact_path:
+            state.active_baton_path = artifact_path
+        return
+
+    if tool == "rd.session.rehydrate_runtime_baton":
+        baton = data.get("baton")
+        if isinstance(baton, dict):
+            baton_id = str(baton.get("baton_id") or "").strip()
+            if baton_id:
+                state.active_baton_id = baton_id
+        return
+
     if tool == "rd.capture.close_replay":
         _forget_session_handle(state, str(args.get("session_id") or ""))
         return
 
     if tool == "rd.capture.close_file":
         _forget_capture_handle(state, str(args.get("capture_file_id") or ""))
+        return
+
+    if tool == "rd.session.clear_context":
+        state.session_id = None
+        state.owner_lease_id = None
+        state.active_baton_id = None
+        state.active_baton_path = None
+        return
+
+    if tool in {"rd.session.select_session", "rd.session.resume"}:
+        current_session_id = str(data.get("current_session_id") or "").strip()
+        if current_session_id:
+            state.session_id = current_session_id
+            _remember_session_handle(state, current_session_id)
         return
 
     if tool == "rd.event.get_actions":
@@ -1222,8 +1386,11 @@ def _track_tool_side_effects(
 
     if tool == "rd.shader.edit_and_replace":
         replacement_id = str(data.get("replacement_id") or "").strip()
-        if replacement_id:
+        status = str(data.get("status") or "").strip().lower()
+        if replacement_id and status != "noop":
             state.replacement_id = replacement_id
+        elif status == "noop":
+            state.replacement_id = None
         return
 
     if tool == "rd.resource.list_textures":
@@ -1292,7 +1459,11 @@ async def _validate_success_follow_up(
     if str(args.get("key") or "").strip() != "notes":
         return None
 
-    payload, raw, exc = await call_fn("rd.session.get_context", {}, timeout_s=15.0)
+    payload, raw, exc = await call_fn(
+        "rd.session.get_context",
+        {"context_id": str(args.get("context_id") or "").strip()} if str(args.get("context_id") or "").strip() else {},
+        timeout_s=15.0,
+    )
     if not isinstance(payload, dict) or not bool(payload.get("ok")):
         code, message = _coalesce_error(payload, raw, exc)
         return (
@@ -1512,7 +1683,11 @@ async def _ensure_capture_handle(call_fn: Any, state: SampleState, files: dict[s
         return
     payload, _, _ = await call_fn(
         "rd.capture.open_file",
-        {"file_path": str(state.rdc_path), "read_only": True},
+        {
+            "file_path": str(state.rdc_path),
+            "read_only": True,
+            **({"context_id": state.context_id} if state.context_id else {}),
+        },
         timeout_s=30.0,
     )
     if payload and payload.get("ok"):
@@ -1674,6 +1849,38 @@ def _preflight_scope_skip(
     param_names: list[str],
     state: SampleState,
 ) -> tuple[str, str, str, str, str] | None:
+    if tool == "rd.core.init":
+        return (
+            "covered by harness bootstrap/init path",
+            "covered_by_harness_init",
+            "scope_skip",
+            "The harness already initializes runtime/config before replay-bound validation; count rd.core.init as covered setup.",
+            "only affects explicit init coverage",
+        )
+    if tool == "rd.event.set_active" and int(state.event_id or 0) <= 1:
+        return (
+            "no validated canonical event focus available from the current sample",
+            "event_focus_unresolved",
+            "scope_skip",
+            "Keep rd.event.set_active as scope_skip until the harness resolves a canonical round-trip event_id for this sample.",
+            "only affects explicit event focus reassignment",
+        )
+    if tool in {"rd.session.select_session", "rd.session.resume"}:
+        return (
+            "requires a persisted multi-session recovery scenario",
+            "session_recovery_scenario_missing",
+            "scope_skip",
+            "Keep select_session/resume as scope_skip unless the harness is explicitly exercising a persisted multi-session context.",
+            "only affects session selection/recovery validation",
+        )
+    if tool in {"rd.session.export_runtime_baton", "rd.session.rehydrate_runtime_baton"}:
+        return (
+            "requires a dedicated live handoff scenario with baton-producing upstream context",
+            "runtime_baton_scenario_missing",
+            "scope_skip",
+            "Keep runtime baton tools as scope_skip unless the harness is explicitly exercising cross-turn/cross-agent live handoff.",
+            "only affects runtime baton validation",
+        )
     if state.matrix == "remote" and tool in FORCED_REMOTE_SKIP_TOOLS:
         return (
             "user-directed skip for live remote endpoint tool",
@@ -1690,6 +1897,8 @@ def _preflight_scope_skip(
             "Use an enumerated counter_id when available; otherwise keep perf describe as scope_skip",
             "only affects perf counter detail path",
         )
+    if tool == "rd.shader.debug_start":
+        return None
 
     return None
 
@@ -1699,6 +1908,15 @@ def _covered_preflight_pass(
     param_names: list[str],
     state: SampleState,
 ) -> tuple[str, str, str, str, str, str] | None:
+    if tool == "rd.shader.revert_replacement" and not state.replacement_id:
+        return (
+            "rd.shader.edit_and_replace",
+            "Covered by upstream rd.shader.edit_and_replace outcome: no live replacement_id was created for this sample",
+            "replacement_not_created",
+            "sample_compatibility",
+            "Only validate rd.shader.revert_replacement when edit_and_replace produced a live replacement_id",
+            "only affects replacement teardown chain",
+        )
     if "shader_debug_id" not in param_names or state.shader_debug_id:
         return None
     return (
@@ -1720,7 +1938,10 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
         state.capture_file_id or (state.known_capture_file_ids[-1] if state.known_capture_file_ids else "")
     ).strip() or None
     if tool == "rd.remote.connect":
-        return _remote_connect_args()
+        args = _remote_connect_args()
+        if "context_id" in param_names and state.context_id:
+            args["context_id"] = state.context_id
+        return args
     if tool == "rd.capture.open_replay":
         args: dict[str, Any] = {}
         if preferred_capture_file_id:
@@ -1729,6 +1950,42 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
         if state.matrix == "remote" and state.live_remote_id:
             options["remote_id"] = state.live_remote_id
         args["options"] = options
+        if "context_id" in param_names and state.context_id:
+            args["context_id"] = state.context_id
+        return args
+    if tool == "rd.session.create_context":
+        context_id = state.context_id or f"contract-{state.matrix}"
+        return {"new_context_id": context_id, "context_id": context_id}
+    if tool == "rd.session.select_context":
+        context_id = state.context_id or f"contract-{state.matrix}"
+        return {"target_context_id": context_id, "context_id": context_id}
+    if tool == "rd.session.claim_runtime_owner":
+        context_id = state.context_id or f"contract-{state.matrix}"
+        runtime_owner = state.runtime_owner or f"contract-owner-{state.matrix}"
+        return {
+            "runtime_owner": runtime_owner,
+            "entry_mode": "mcp" if state.matrix == "remote" else "cli",
+            "backend": "remote" if state.matrix == "remote" else "local",
+            "context_id": context_id,
+        }
+    if tool == "rd.session.release_runtime_owner":
+        context_id = state.context_id or f"contract-{state.matrix}"
+        args: dict[str, Any] = {"context_id": context_id, "force": True}
+        if state.runtime_owner:
+            args["runtime_owner"] = state.runtime_owner
+        if state.owner_lease_id:
+            args["owner_lease_id"] = state.owner_lease_id
+        return args
+    if tool == "rd.session.export_runtime_baton":
+        context_id = state.context_id or f"contract-{state.matrix}"
+        return {"task_goal": f"{state.matrix} contract smoke baton", "context_id": context_id}
+    if tool == "rd.session.rehydrate_runtime_baton":
+        context_id = state.context_id or f"contract-{state.matrix}"
+        args: dict[str, Any] = {"context_id": context_id}
+        if state.active_baton_path:
+            args["baton_path"] = state.active_baton_path
+        elif state.active_baton_id:
+            args["baton_id"] = state.active_baton_id
         return args
     if tool == "rd.shader.compile":
         source_encoding = str(
@@ -1862,6 +2119,8 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
                 args[param] = str(files["zip_out"])
             elif tool == "rd.util.diff_images":
                 args[param] = str(files["artifacts"] / f"{state.matrix}_image_diff.png")
+            elif tool in {"rd.texture.get_data", "rd.texture.get_subresource_data"}:
+                args[param] = str(files["artifacts"] / f"{state.matrix}_{tool.replace('.', '_')}.npz")
             elif tool == "rd.export.texture":
                 args[param] = str(files["artifacts"] / f"{state.matrix}_texture_out.png")
             elif tool == "rd.export.buffer":
@@ -1986,8 +2245,10 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
         elif param == "status":
             args[param] = "completed"
         elif param == "target":
-            if tool in {"rd.shader.compile", "rd.shader.get_disassembly"}:
+            if tool == "rd.shader.compile":
                 args[param] = "ps_5_0"
+            elif tool == "rd.shader.get_disassembly":
+                args[param] = "auto"
             elif tool == "rd.debug.run_to":
                 args[param] = {"pc": int(state.debug_pc)}
             elif state.debug_target:
@@ -2253,7 +2514,13 @@ async def _repair_shader_focus(
 
     actions_payload, _, _ = await call_fn(
         "rd.event.get_actions",
-        {"session_id": state.session_id, "include_markers": True, "include_drawcalls": True, "max_nodes": 512},
+        {
+            "session_id": state.session_id,
+            "include_markers": True,
+            "include_drawcalls": True,
+            "max_nodes": 512,
+            **({"context_id": state.context_id} if state.context_id else {}),
+        },
         timeout_s=20.0,
     )
     if not (actions_payload and actions_payload.get("ok")):
@@ -2275,12 +2542,20 @@ async def _repair_shader_focus(
             continue
         await call_fn(
             "rd.event.set_active",
-            {"session_id": state.session_id, "event_id": candidate_event},
+            {
+                "session_id": state.session_id,
+                "event_id": candidate_event,
+                **({"context_id": state.context_id} if state.context_id else {}),
+            },
             timeout_s=20.0,
         )
         shader_probe, _, _ = await call_fn(
             "rd.pipeline.get_shader",
-            {"session_id": state.session_id, "stage": "ps"},
+            {
+                "session_id": state.session_id,
+                "stage": "ps",
+                **({"context_id": state.context_id} if state.context_id else {}),
+            },
             timeout_s=20.0,
         )
         if not (shader_probe and shader_probe.get("ok")):
@@ -2324,6 +2599,17 @@ async def _rebuild_replay_context(
         },
         timeout_s=25.0,
     )
+    if state.context_id:
+        await call_fn(
+            "rd.session.create_context",
+            {"new_context_id": state.context_id, "context_id": state.context_id},
+            timeout_s=15.0,
+        )
+        await call_fn(
+            "rd.session.select_context",
+            {"target_context_id": state.context_id, "context_id": state.context_id},
+            timeout_s=15.0,
+        )
     if state.matrix == "remote":
         await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
     await _ensure_capture_handle(call_fn, state, files)
@@ -2334,7 +2620,11 @@ async def _rebuild_replay_context(
         open_replay_options["remote_id"] = state.live_remote_id
     payload, _, _ = await call_fn(
         "rd.capture.open_replay",
-        {"capture_file_id": state.capture_file_id, "options": open_replay_options},
+        {
+            "capture_file_id": state.capture_file_id,
+            "options": open_replay_options,
+            **({"context_id": state.context_id} if state.context_id else {}),
+        },
         timeout_s=35.0,
     )
     if not (payload and payload.get("ok")):
@@ -2345,7 +2635,15 @@ async def _rebuild_replay_context(
         state.session_id = None
         return
     _remember_session_handle(state, state.session_id)
-    await call_fn("rd.replay.set_frame", {"session_id": state.session_id, "frame_index": 0}, timeout_s=20.0)
+    await call_fn(
+        "rd.replay.set_frame",
+        {
+            "session_id": state.session_id,
+            "frame_index": 0,
+            **({"context_id": state.context_id} if state.context_id else {}),
+        },
+        timeout_s=20.0,
+    )
     await _repair_shader_focus(call_fn, state)
 
 
@@ -2642,8 +2940,14 @@ async def _run_transport_mcp(
         env=_server_env(),
     )
     states = {
-        "local": SampleState(matrix="local", rdc_path=local_rdc),
-        "remote": SampleState(matrix="remote", rdc_path=remote_rdc),
+        "local": SampleState(
+            matrix="local",
+            rdc_path=local_rdc,
+        ),
+        "remote": SampleState(
+            matrix="remote",
+            rdc_path=remote_rdc,
+        ),
     }
 
     try:
@@ -2963,8 +3267,18 @@ async def _run_transport_daemon(
     executor = DaemonExecutor(root=root, context_name=context_name)
 
     states = {
-        "local": SampleState(matrix="local", rdc_path=local_rdc),
-        "remote": SampleState(matrix="remote", rdc_path=remote_rdc),
+        "local": SampleState(
+            matrix="local",
+            rdc_path=local_rdc,
+            context_id="contract-local",
+            runtime_owner="contract-owner-local",
+        ),
+        "remote": SampleState(
+            matrix="remote",
+            rdc_path=remote_rdc,
+            context_id="contract-remote",
+            runtime_owner="contract-owner-remote",
+        ),
     }
 
     ok_start, start_detail = await executor.startup()
@@ -3105,7 +3419,7 @@ async def _run_transport_daemon(
                     ),
                 )
                 continue
-            if matrix == "remote" and name in SESSION_REFRESH_TOOLS:
+            if name in SESSION_REFRESH_TOOLS:
                 await _rebuild_replay_context(_call_daemon, state, files)
 
             covered_pass = _covered_preflight_pass(name, param_names, state)

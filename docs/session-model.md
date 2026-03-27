@@ -106,8 +106,8 @@ remote endpoint
 
 - `runtime_parallelism_ceiling` 只描述 transport/runtime 层的能力上限。
 - local ceiling 为 `multi_context_multi_owner`，remote ceiling 固定为 `single_runtime_owner`。
-- Frameworks may consume local ceiling as concurrent_team or staged_handoff orchestrated multi-context; Tools does not choose the platform coordination policy.
-- session_locator only aligns rdc_path/session_id/frame_index/active_event_id for correlation and rehydrate hints; it is not a stable cross-process handle.
+- 上层 Framework 可把 local ceiling 消费成 `concurrent_team` 或 `staged_handoff` 的 orchestrated multi-context，但 Tools 不负责替宿主选择 coordination policy。
+- `session_locator` 只对齐 `rdc_path` / `session_id` / `frame_index` / `active_event_id`，用于关联与恢复提示；它不是稳定的跨进程 handle。
 - 这不等于所有宿主都能并发多 live owners；平台是否允许 team-style coordination 由上层 Frameworks 决定。
 
 ## 3. `CLI capture open` 实际做了什么
@@ -163,6 +163,8 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 - `rd.session.list_sessions` / `rd.session.resume` 面向持久化状态索引，不等于“直接遍历所有 runtime 内部对象”。
 - 真正的 live replay/debug 对象存在于 runtime 内部对象层，不能简单由某一份状态文件完全代表。
 - `last_artifacts` 是有界 recent index，而不是 artifact 仓库本身；当前 retention policy 默认为 `total_limit=32`、`per_type_limit=8`。
+- remote 相关的真实能力面不会再被压扁进 `runtime_parallelism_ceiling`；需要区分 remote endpoint / replay / event-bound inspection / shader debug / shader replace / shader compile / fix verification 时，应读取 `rd.session.get_context -> remote_capability_matrix`。
+- `remote_context_locality=strict` 与 `remote_handle_reuse_policy=must_reconnect` 是 context-scope hard contract；remote handle 不能跨 context 复用，也不能在需要 remote replay 时静默掉回 local。
 
 ## 5. `context`、daemon 与 session state
 
