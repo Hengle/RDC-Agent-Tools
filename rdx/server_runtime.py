@@ -37,14 +37,17 @@ from rdx.context_snapshot import (
     SnapshotRetentionPolicy,
     clear_context_snapshot,
     default_context_snapshot,
+    default_preview_state,
     load_context_snapshot,
     merge_recent_artifacts,
     normalize_context_id,
     normalize_context_snapshot,
+    normalize_preview_state,
     normalize_pixel,
     save_context_snapshot,
     update_user_context,
 )
+from rdx.preview_window import PreviewWindowHost
 from rdx.core.artifact_publisher import ArtifactPublisher
 from rdx.core.contracts import TSV_FORMAT_VERSION, canonical_error, env_bool
 from rdx.core.errors import CoreError, RuntimeToolError
@@ -205,10 +208,23 @@ class RuntimeState:
     context_snapshots: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     context_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     hydrated_contexts: set[str] = field(default_factory=set)
+    previews: Dict[str, "PreviewBinding"] = field(default_factory=dict)
     shader_debugs: Dict[str, ShaderDebugHandle] = field(default_factory=dict)
     shader_replacements: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     initialized: bool = False
     enable_remote: bool = True
+
+
+@dataclass
+class PreviewBinding:
+    context_id: str
+    host: PreviewWindowHost
+    output: Any | None = None
+    bound_session_id: str = ""
+    bound_capture_file_id: str = ""
+    bound_event_id: int = 0
+    backend: str = "local"
+    last_error: str = ""
 
 
 _config: Optional[RdxConfig] = None
@@ -236,6 +252,8 @@ _LIVE_OWNER_PREFIXES = (
     "rd.export.",
     "rd.debug.",
     "rd.perf.",
+    "rd.session.open_preview",
+    "rd.session.close_preview",
 )
 
 
@@ -452,6 +470,66 @@ def _store_context_state(state: Dict[str, Any], context_id: Optional[str] = None
     return saved
 
 
+def _context_preview_state(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    preview = normalize_preview_state(
+        state.get("preview"),
+        backend=str(state.get("backend") or "local"),
+    )
+    state["preview"] = dict(preview)
+    return preview
+
+
+def _preview_update_payload(
+    context_id: str,
+    preview: Dict[str, Any],
+    *,
+    enabled: Optional[bool] = None,
+    state_name: Optional[str] = None,
+    bound_session_id: Optional[str] = None,
+    bound_capture_file_id: Optional[str] = None,
+    bound_event_id: Optional[int] = None,
+    backend: Optional[str] = None,
+    recovered_from_session_id: Optional[str] = None,
+    rebind_count: Optional[int] = None,
+    last_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = dict(preview or {})
+    if enabled is not None:
+        payload["enabled"] = bool(enabled)
+    if state_name is not None:
+        payload["state"] = str(state_name or "").strip() or payload.get("state") or "disabled"
+    if bound_session_id is not None:
+        payload["bound_session_id"] = str(bound_session_id or "").strip()
+    if bound_capture_file_id is not None:
+        payload["bound_capture_file_id"] = str(bound_capture_file_id or "").strip()
+    if bound_event_id is not None:
+        payload["bound_event_id"] = int(bound_event_id or 0)
+    if backend is not None:
+        payload["backend"] = str(backend or "local").strip() or "local"
+    if recovered_from_session_id is not None:
+        payload["recovered_from_session_id"] = str(recovered_from_session_id or "").strip()
+    if rebind_count is not None:
+        payload["rebind_count"] = max(0, int(rebind_count or 0))
+    if last_error is not None:
+        payload["last_error"] = str(last_error or "").strip()
+    payload["view_mode"] = "active_event"
+    payload["updated_at_ms"] = _now_ms()
+    return normalize_preview_state(payload, backend=str(payload.get("backend") or "local"))
+
+
+def _store_preview_state(
+    context_id: str,
+    preview: Dict[str, Any],
+) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    state["preview"] = normalize_preview_state(preview, backend=str(state.get("backend") or "local"))
+    _store_context_state(state, ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
 def _capture_file_metadata(file_path: str) -> Dict[str, Any]:
     path = Path(str(file_path or "")).resolve()
     if not path.is_file():
@@ -651,6 +729,10 @@ def _sync_context_snapshot_from_state(context_id: Optional[str] = None) -> Dict[
     else:
         snapshot["runtime"] = default_context_snapshot(ctx).get("runtime", {})
     snapshot = _apply_coordination_projection(snapshot, state)
+    snapshot["preview"] = normalize_preview_state(
+        state.get("preview"),
+        backend=str(snapshot.get("backend") or state.get("backend") or "local"),
+    )
     _store_context_state(state, ctx)
     return _store_context_snapshot(snapshot, ctx)
 
@@ -1136,6 +1218,718 @@ def _set_context_frame(session_id: str, frame_index: int, active_event_id: int, 
         frame_index=int(frame_index or 0),
         active_event_id=int(active_event_id or 0),
     )
+
+
+def _preview_title(
+    context_id: str,
+    *,
+    backend: str,
+    session_id: str,
+    event_id: int,
+) -> str:
+    return f"RDX Preview [{context_id}] [{backend}] {session_id} @ event {int(event_id)}"
+
+
+def _preview_error(
+    code: str,
+    message: str,
+    *,
+    context_id: str,
+    session_id: str = "",
+    event_id: int = 0,
+    backend: str = "local",
+) -> CoreError:
+    return CoreError(
+        code=code,
+        message=message,
+        category="runtime",
+        details={
+            "context_id": context_id,
+            "session_id": str(session_id or ""),
+            "event_id": int(event_id or 0),
+            "backend": str(backend or "local"),
+            "view_mode": "active_event",
+        },
+    )
+
+
+def _preview_state_value(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    preview = normalize_preview_state(
+        state.get("preview"),
+        backend=str(state.get("backend") or "local"),
+    )
+    state["preview"] = dict(preview)
+    return preview
+
+
+def _preview_binding(context_id: Optional[str] = None) -> Optional[PreviewBinding]:
+    return _runtime.previews.get(normalize_context_id(context_id or _runtime_context_id()))
+
+
+def _preview_window_closed(context_id: str, closed_by_user: bool) -> None:
+    ctx = normalize_context_id(context_id)
+    binding = _runtime.previews.pop(ctx, None)
+    if binding is not None and binding.output is not None:
+        try:
+            binding.output.Shutdown()
+        except Exception:
+            pass
+        binding.output = None
+    if not closed_by_user:
+        return
+    preview = _preview_state_value(ctx)
+    preview = _preview_update_payload(
+        ctx,
+        preview,
+        enabled=False,
+        state_name="disabled",
+        bound_session_id="",
+        bound_capture_file_id="",
+        bound_event_id=0,
+        recovered_from_session_id="",
+        last_error="",
+    )
+    _store_preview_state(ctx, preview)
+
+
+async def _close_preview_output(binding: PreviewBinding) -> None:
+    if binding.output is None:
+        return
+    output = binding.output
+    binding.output = None
+    try:
+        await _offload(output.Shutdown)
+    except Exception:
+        try:
+            output.Shutdown()
+        except Exception:
+            pass
+
+
+async def _close_preview_binding(
+    context_id: Optional[str] = None,
+    *,
+    close_window: bool = True,
+) -> Optional[PreviewBinding]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    binding = _runtime.previews.pop(ctx, None)
+    if binding is None:
+        return None
+    await _close_preview_output(binding)
+    if close_window:
+        try:
+            binding.host.close(by_user=False)
+        except Exception:
+            pass
+    return binding
+
+
+async def _create_preview_binding(
+    context_id: str,
+    *,
+    title: str,
+) -> PreviewBinding:
+    host = PreviewWindowHost(
+        title=title,
+        on_closed=lambda by_user, ctx=context_id: _preview_window_closed(ctx, by_user),
+    )
+    try:
+        host.start()
+    except Exception as exc:  # noqa: BLE001
+        raise _preview_error(
+            "preview_window_create_failed",
+            f"Failed to create preview window: {exc}",
+            context_id=context_id,
+        ) from exc
+    binding = PreviewBinding(context_id=context_id, host=host)
+    _runtime.previews[context_id] = binding
+    return binding
+
+
+async def _ensure_preview_output(binding: PreviewBinding, session_id: str) -> Any:
+    if binding.output is not None and binding.bound_session_id == str(session_id or ""):
+        return binding.output
+    await _close_preview_output(binding)
+    rd = _get_rd()
+    if not hasattr(rd, "CreateWin32WindowingData"):
+        raise _preview_error(
+            "preview_backend_unavailable",
+            "RenderDoc runtime does not expose CreateWin32WindowingData",
+            context_id=binding.context_id,
+            session_id=session_id,
+            backend=binding.backend,
+        )
+    controller = await _get_controller(session_id)
+    hwnd = int(binding.host.hwnd or 0)
+    if hwnd <= 0:
+        raise _preview_error(
+            "preview_window_unavailable",
+            "Preview window is not alive",
+            context_id=binding.context_id,
+            session_id=session_id,
+            backend=binding.backend,
+        )
+    try:
+        output = await _offload(
+            controller.CreateOutput,
+            rd.CreateWin32WindowingData(hwnd),
+            rd.ReplayOutputType.Texture,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _preview_error(
+            "preview_output_create_failed",
+            f"Failed to create preview output: {exc}",
+            context_id=binding.context_id,
+            session_id=session_id,
+            backend=binding.backend,
+        ) from exc
+    binding.output = output
+    return output
+
+
+async def _choose_visual_output_target(
+    session_id: str,
+    event_id: int,
+    *,
+    target: Optional[Dict[str, Any]] = None,
+    allow_framebuffer_fallback: bool = True,
+) -> Tuple[Any, Optional[Any], Optional[int], str]:
+    parsed_target = target or {}
+    explicit_target = parsed_target.get("texture_id") or parsed_target.get("textureId")
+    requested_rt_index_raw = parsed_target.get("rt_index")
+    if requested_rt_index_raw is None:
+        requested_rt_index_raw = parsed_target.get("rtIndex")
+    requested_rt_index = _as_int(requested_rt_index_raw, 0 if not explicit_target else -1)
+    chosen_output_slot: Optional[int] = None
+    best_texture_desc: Optional[Any] = None
+    best_target_source = "event_output_slot"
+
+    if explicit_target:
+        target_texture_id, texture_desc = await _get_texture_descriptor(
+            session_id,
+            explicit_target,
+            event_id=event_id,
+        )
+        return target_texture_id, texture_desc, None, "explicit_resource"
+
+    output_targets = await _output_target_resource_ids(session_id, event_id)
+    requested_output: Optional[Tuple[Any, int]] = None
+    for candidate_id, candidate_slot in output_targets:
+        if int(candidate_slot) == int(requested_rt_index):
+            requested_output = (candidate_id, int(candidate_slot))
+            break
+
+    if requested_output is not None:
+        best_texture_id, chosen_output_slot = requested_output
+        target_texture_id, texture_desc = await _get_texture_descriptor(
+            session_id,
+            best_texture_id,
+            event_id=event_id,
+        )
+        return target_texture_id, texture_desc, chosen_output_slot, best_target_source
+
+    if output_targets and requested_rt_index >= 0:
+        available_slots = [int(slot) for _, slot in output_targets]
+        raise _preview_error(
+            "preview_event_output_slot_unavailable",
+            (
+                f"Active event {int(event_id)} does not expose RT slot {int(requested_rt_index)}; "
+                f"available slots: {available_slots}"
+            ),
+            context_id=_runtime_context_id(),
+            session_id=session_id,
+            event_id=event_id,
+            backend=str(_context_state(_runtime_context_id()).get('backend') or 'local'),
+        )
+
+    best_texture_id: Optional[Any] = None
+    best_score = float("-inf")
+    for candidate_id, candidate_slot in output_targets:
+        try:
+            stats = await _render_service.get_texture_stats(
+                session_id=session_id,
+                event_id=event_id,
+                texture_id=candidate_id,
+                session_manager=_session_manager,
+            )
+            channels = _as_dict(stats.get("channels"), default={})
+            rgb_spread = 0.0
+            for channel in ("r", "g", "b"):
+                channel_data = _as_dict(channels.get(channel), default={})
+                cmin = channel_data.get("min")
+                cmax = channel_data.get("max")
+                if cmin is None or cmax is None:
+                    continue
+                try:
+                    rgb_spread += abs(float(cmax) - float(cmin))
+                except Exception:
+                    continue
+            alpha = _as_dict(channels.get("a"), default={})
+            try:
+                alpha_spread = abs(float(alpha.get("max", 0.0)) - float(alpha.get("min", 0.0)))
+            except Exception:
+                alpha_spread = 0.0
+            score = (rgb_spread * 10.0) + alpha_spread
+            if not _as_bool(stats.get("has_any_nan"), False) and not _as_bool(stats.get("has_any_inf"), False):
+                score += 0.1
+            if score > best_score:
+                best_score = score
+                best_texture_id = candidate_id
+                best_texture_desc = None
+                chosen_output_slot = candidate_slot
+        except Exception:
+            continue
+
+    if best_texture_id is None:
+        binding_candidates = await _binding_texture_candidates_for_event(session_id, event_id)
+        for candidate_id, texture_desc, binding_type, binding_name, binding_index in binding_candidates:
+            score = 50.0 if binding_type == "SRV" else 100.0
+            name_text = str(binding_name or "").strip().lower()
+            if name_text:
+                if any(hint in name_text for hint in ("output", "result", "scene", "color", "final", "lit", "compose")):
+                    score += 10.0
+                if any(hint in name_text for hint in _MASK_HINTS):
+                    score -= 15.0
+                if any(hint in name_text for hint in _NORMAL_HINTS):
+                    score -= 20.0
+            try:
+                width = int(getattr(texture_desc, "width", 0) or 0)
+                height = int(getattr(texture_desc, "height", 0) or 0)
+                if width > 0 and height > 0:
+                    score += min(float(width * height) / 262144.0, 8.0)
+            except Exception:
+                pass
+            try:
+                stats = await _render_service.get_texture_stats(
+                    session_id=session_id,
+                    event_id=event_id,
+                    texture_id=candidate_id,
+                    session_manager=_session_manager,
+                )
+                channels = _as_dict(stats.get("channels"), default={})
+                rgb_spread = 0.0
+                for channel in ("r", "g", "b"):
+                    channel_data = _as_dict(channels.get(channel), default={})
+                    cmin = channel_data.get("min")
+                    cmax = channel_data.get("max")
+                    if cmin is None or cmax is None:
+                        continue
+                    try:
+                        rgb_spread += abs(float(cmax) - float(cmin))
+                    except Exception:
+                        continue
+                alpha = _as_dict(channels.get("a"), default={})
+                try:
+                    alpha_spread = abs(float(alpha.get("max", 0.0)) - float(alpha.get("min", 0.0)))
+                except Exception:
+                    alpha_spread = 0.0
+                score += (rgb_spread * 10.0) + alpha_spread
+                if not _as_bool(stats.get("has_any_nan"), False) and not _as_bool(stats.get("has_any_inf"), False):
+                    score += 0.1
+            except Exception:
+                pass
+            if score > best_score:
+                best_score = score
+                best_texture_id = candidate_id
+                best_texture_desc = texture_desc
+                chosen_output_slot = None
+                best_target_source = f"event_binding_{binding_type.lower()}_{binding_index}"
+
+    if best_texture_id is None:
+        if output_targets:
+            best_texture_id, chosen_output_slot = output_targets[0]
+            best_texture_desc = None
+        elif allow_framebuffer_fallback:
+            best_texture_id, _ = await _get_texture_descriptor(
+                session_id,
+                None,
+                event_id=event_id,
+            )
+            target_texture_id, texture_desc = await _get_texture_descriptor(
+                session_id,
+                best_texture_id,
+                event_id=event_id,
+            )
+            return target_texture_id, texture_desc, None, "framebuffer_fallback"
+        else:
+            raise _preview_error(
+                "preview_event_output_unavailable",
+                f"Active event {int(event_id)} has no previewable output target",
+                context_id=_runtime_context_id(),
+                session_id=session_id,
+                event_id=event_id,
+                backend=str(_context_state(_runtime_context_id()).get('backend') or 'local'),
+            )
+
+    if best_texture_desc is not None:
+        return best_texture_id, best_texture_desc, chosen_output_slot, best_target_source
+
+    target_texture_id, texture_desc = await _get_texture_descriptor(
+        session_id,
+        best_texture_id,
+        event_id=event_id,
+    )
+    return target_texture_id, texture_desc, chosen_output_slot, best_target_source
+
+
+async def _display_preview_binding(
+    binding: PreviewBinding,
+    *,
+    session_id: str,
+    event_id: int,
+) -> Dict[str, Any]:
+    rd = _get_rd()
+    await _ensure_event(session_id, event_id)
+    output = await _ensure_preview_output(binding, session_id)
+    target_texture_id, texture_desc, chosen_output_slot, target_source = await _choose_visual_output_target(
+        session_id,
+        int(event_id),
+        allow_framebuffer_fallback=False,
+    )
+    display = rd.TextureDisplay()
+    display.resourceId = target_texture_id
+    display.subresource = rd.Subresource()
+    display.typeCast = rd.CompType.Typeless
+    display.overlay = rd.DebugOverlay.NoOverlay
+    display.rawOutput = False
+    display.red = True
+    display.green = True
+    display.blue = True
+    display.alpha = False
+    display.scale = 1.0
+    display.rangeMin = 0.0
+    display.rangeMax = 1.0
+    display.hdrMultiplier = -1.0
+    display.flipY = False
+    try:
+        await _offload(output.SetTextureDisplay, display)
+        await _offload(output.Display)
+    except Exception as exc:  # noqa: BLE001
+        raise _preview_error(
+            "preview_display_failed",
+            f"Failed to display preview output: {exc}",
+            context_id=binding.context_id,
+            session_id=session_id,
+            event_id=event_id,
+            backend=binding.backend,
+        ) from exc
+    return {
+        "texture_id": str(target_texture_id),
+        "texture_format": _texture_format_name(texture_desc),
+        "chosen_output_slot": chosen_output_slot,
+        "target_source": target_source,
+    }
+
+
+async def _sync_context_preview(
+    context_id: Optional[str] = None,
+    *,
+    strict: bool = False,
+    enable_intent: Optional[bool] = None,
+) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state = _select_session_from_state(state)
+    _store_context_state(state, ctx)
+    preview = _preview_state_value(ctx)
+    if enable_intent is not None:
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=bool(enable_intent),
+            state_name="disabled" if not enable_intent else ("starting" if not preview.get("enabled") else str(preview.get("state") or "starting")),
+            last_error="",
+        )
+        _store_preview_state(ctx, preview)
+        preview = _preview_state_value(ctx)
+
+    if not preview.get("enabled"):
+        await _close_preview_binding(ctx)
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=False,
+            state_name="disabled",
+            bound_session_id="",
+            bound_capture_file_id="",
+            bound_event_id=0,
+            recovered_from_session_id="",
+            last_error="",
+        )
+        return _store_preview_state(ctx, preview)
+
+    current_session_id = str(state.get("current_session_id") or "").strip()
+    current_capture_file_id = str(state.get("current_capture_file_id") or "").strip()
+    current_backend = str(state.get("backend") or "local").strip() or "local"
+    active_event_id = int(
+        ((state.get("sessions") or {}).get(current_session_id) or {}).get("active_event_id")
+        or ((preview.get("bound_event_id") or 0) if str(preview.get("bound_session_id") or "") == current_session_id else 0)
+        or 0
+    )
+    if not current_session_id:
+        await _close_preview_binding(ctx)
+        error = _preview_error(
+            "preview_session_required",
+            "Preview requires a current replay session",
+            context_id=ctx,
+            backend=current_backend,
+        )
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=True,
+            state_name="failed" if strict else "stale",
+            bound_session_id="",
+            bound_capture_file_id=current_capture_file_id,
+            bound_event_id=0,
+            backend=current_backend,
+            last_error=error.message,
+        )
+        snapshot = _store_preview_state(ctx, preview)
+        if strict:
+            raise error
+        return snapshot
+
+    try:
+        await _ensure_live_session(current_session_id)
+    except CoreError as exc:
+        await _close_preview_binding(ctx)
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=True,
+            state_name="failed" if strict else "stale",
+            bound_session_id=current_session_id,
+            bound_capture_file_id=current_capture_file_id,
+            bound_event_id=0,
+            backend=current_backend,
+            last_error=exc.message,
+        )
+        snapshot = _store_preview_state(ctx, preview)
+        if strict:
+            raise
+        return snapshot
+
+    if active_event_id <= 0:
+        await _close_preview_binding(ctx)
+        error = _preview_error(
+            "preview_event_required",
+            "Preview requires a resolved active_event_id",
+            context_id=ctx,
+            session_id=current_session_id,
+            backend=current_backend,
+        )
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=True,
+            state_name="failed" if strict else "stale",
+            bound_session_id=current_session_id,
+            bound_capture_file_id=current_capture_file_id,
+            bound_event_id=0,
+            backend=current_backend,
+            last_error=error.message,
+        )
+        snapshot = _store_preview_state(ctx, preview)
+        if strict:
+            raise error
+        return snapshot
+
+    controller = await _get_controller(current_session_id)
+    _, _, by_event = await _load_action_index(current_session_id, controller=controller)
+    if active_event_id not in by_event:
+        await _close_preview_binding(ctx)
+        error = _preview_error(
+            "preview_event_not_resolvable",
+            f"Active event is not resolvable for preview: {int(active_event_id)}",
+            context_id=ctx,
+            session_id=current_session_id,
+            event_id=active_event_id,
+            backend=current_backend,
+        )
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=True,
+            state_name="failed" if strict else "stale",
+            bound_session_id=current_session_id,
+            bound_capture_file_id=current_capture_file_id,
+            bound_event_id=active_event_id,
+            backend=current_backend,
+            last_error=error.message,
+        )
+        snapshot = _store_preview_state(ctx, preview)
+        if strict:
+            raise error
+        return snapshot
+
+    binding = _preview_binding(ctx)
+    had_binding = binding is not None
+    previous_session_id = str((binding.bound_session_id if binding is not None else "") or preview.get("bound_session_id") or "").strip()
+    session_changed = bool(binding is not None and binding.bound_session_id and binding.bound_session_id != current_session_id)
+
+    if binding is None:
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=True,
+            state_name="reconnecting" if preview.get("bound_session_id") else "starting",
+            backend=current_backend,
+            bound_session_id=current_session_id,
+            bound_capture_file_id=current_capture_file_id,
+            bound_event_id=active_event_id,
+            last_error="",
+        )
+        _store_preview_state(ctx, preview)
+        binding = await _create_preview_binding(
+            ctx,
+            title=_preview_title(
+                ctx,
+                backend=current_backend,
+                session_id=current_session_id,
+                event_id=active_event_id,
+            ),
+        )
+    elif session_changed:
+        await _close_preview_output(binding)
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=True,
+            state_name="reconnecting",
+            backend=current_backend,
+            bound_session_id=current_session_id,
+            bound_capture_file_id=current_capture_file_id,
+            bound_event_id=active_event_id,
+            last_error="",
+        )
+        _store_preview_state(ctx, preview)
+
+    try:
+        await _display_preview_binding(
+            binding,
+            session_id=current_session_id,
+            event_id=active_event_id,
+        )
+    except CoreError as exc:
+        await _close_preview_binding(ctx)
+        preview = _preview_update_payload(
+            ctx,
+            preview,
+            enabled=True,
+            state_name="failed",
+            bound_session_id=current_session_id,
+            bound_capture_file_id=current_capture_file_id,
+            bound_event_id=active_event_id,
+            backend=current_backend,
+            last_error=exc.message,
+        )
+        snapshot = _store_preview_state(ctx, preview)
+        if strict:
+            raise
+        return snapshot
+
+    binding.bound_session_id = current_session_id
+    binding.bound_capture_file_id = current_capture_file_id
+    binding.bound_event_id = int(active_event_id)
+    binding.backend = current_backend
+    binding.last_error = ""
+    binding.host.set_title(
+        _preview_title(
+            ctx,
+            backend=current_backend,
+            session_id=current_session_id,
+            event_id=active_event_id,
+        )
+    )
+    rebind_count = int(preview.get("rebind_count") or 0)
+    if previous_session_id or (had_binding and session_changed):
+        if previous_session_id != current_session_id or not had_binding:
+            rebind_count += 1
+    preview = _preview_update_payload(
+        ctx,
+        preview,
+        enabled=True,
+        state_name="live",
+        bound_session_id=current_session_id,
+        bound_capture_file_id=current_capture_file_id,
+        bound_event_id=active_event_id,
+        backend=current_backend,
+        recovered_from_session_id=previous_session_id if previous_session_id and previous_session_id != current_session_id else "",
+        rebind_count=rebind_count,
+        last_error="",
+    )
+    return _store_preview_state(ctx, preview)
+
+
+async def _open_context_preview(context_id: Optional[str] = None, *, requested_session_id: str = "") -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state = _select_session_from_state(state)
+    _store_context_state(state, ctx)
+    current_session_id = str(state.get("current_session_id") or "").strip()
+    wanted_session_id = str(requested_session_id or "").strip()
+    if wanted_session_id and wanted_session_id != current_session_id:
+        raise _preview_error(
+            "preview_session_mismatch",
+            (
+                f"Preview only binds the current session for context {ctx}; "
+                f"select session {wanted_session_id} first"
+            ),
+            context_id=ctx,
+            session_id=wanted_session_id,
+            backend=str(state.get("backend") or "local"),
+        )
+    snapshot = await _sync_context_preview(ctx, strict=True, enable_intent=True)
+    state = _context_state(ctx)
+    return {
+        "context_id": ctx,
+        "current_session_id": str(state.get("current_session_id") or ""),
+        "runtime": dict(snapshot.get("runtime") or {}),
+        "preview": dict(snapshot.get("preview") or {}),
+        "updated_at_ms": int(snapshot.get("updated_at_ms") or 0),
+    }
+
+
+async def _close_context_preview(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    await _close_preview_binding(ctx)
+    preview = _preview_state_value(ctx)
+    snapshot = _store_preview_state(
+        ctx,
+        _preview_update_payload(
+            ctx,
+            preview,
+            enabled=False,
+            state_name="disabled",
+            bound_session_id="",
+            bound_capture_file_id="",
+            bound_event_id=0,
+            recovered_from_session_id="",
+            last_error="",
+        ),
+    )
+    state = _context_state(ctx)
+    return {
+        "context_id": ctx,
+        "current_session_id": str(state.get("current_session_id") or ""),
+        "runtime": dict(snapshot.get("runtime") or {}),
+        "preview": dict(snapshot.get("preview") or {}),
+        "updated_at_ms": int(snapshot.get("updated_at_ms") or 0),
+    }
+
+
+async def _auto_sync_preview_if_enabled(context_id: Optional[str] = None) -> None:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    preview = _preview_state_value(ctx)
+    if not preview.get("enabled"):
+        return
+    try:
+        await _sync_context_preview(ctx, strict=False)
+    except Exception as exc:  # noqa: BLE001
+        _record_log("warning", f"preview auto-sync failed: {exc}", {"context_id": ctx})
 
 
 
@@ -2935,6 +3729,41 @@ def _pick_default_event_id(actions: Sequence[Any]) -> int:
     return int(getattr(flat[0], "eventId", 0)) if flat else 0
 
 
+async def _pick_previewable_default_event_id(
+    session_id: str,
+    actions: Sequence[Any],
+    *,
+    fallback_event_id: int = 0,
+) -> int:
+    fallback = int(fallback_event_id or _pick_default_event_id(actions) or 0)
+    flat, _ = _build_action_index(actions)
+    candidate_event_ids: List[int] = []
+    if fallback > 0:
+        candidate_event_ids.append(fallback)
+    for action in flat:
+        event_id = int(getattr(action, "eventId", 0))
+        if event_id <= 0 or event_id in candidate_event_ids:
+            continue
+        flags = _map_action_flags(getattr(action, "flags", 0))
+        if flags.get("is_draw") or flags.get("is_dispatch"):
+            candidate_event_ids.append(event_id)
+    for candidate_event_id in candidate_event_ids:
+        try:
+            await _choose_visual_output_target(
+                session_id,
+                candidate_event_id,
+                allow_framebuffer_fallback=False,
+            )
+            return candidate_event_id
+        except Exception:
+            continue
+    if fallback > 0:
+        controller = await _get_controller(session_id)
+        await _offload(controller.SetFrameEvent, fallback, True)
+        _store_active_event(session_id, fallback)
+    return fallback
+
+
 def _action_name(action: Any) -> str:
     return str(getattr(action, "customName", "") or getattr(action, "name", "") or "")
 
@@ -3244,6 +4073,67 @@ async def _binding_name_index_for_event(session_id: str, event_id: Optional[int]
             if label not in bucket:
                 bucket.append(label)
     return index
+
+
+async def _binding_texture_candidates_for_event(
+    session_id: str,
+    event_id: Optional[int],
+) -> List[Tuple[Any, Any, str, str, int]]:
+    if _pipeline_service is None:
+        return []
+    evt = _as_int(event_id, 0)
+    if evt <= 0:
+        try:
+            evt = await _ensure_event(session_id, None)
+        except Exception:
+            evt = 0
+    if evt <= 0:
+        return []
+    try:
+        bindings = await _pipeline_service.get_resource_bindings(session_id, evt, _session_manager)
+    except Exception:
+        return []
+    controller = await _get_controller(session_id)
+    textures = await _offload(controller.GetTextures)
+    by_resource_key: Dict[str, Any] = {}
+    for texture in textures:
+        rid = getattr(texture, "resourceId", None)
+        if rid is None:
+            continue
+        for key in _resource_id_tokens(rid):
+            by_resource_key[key] = texture
+
+    candidates_by_key: Dict[str, Tuple[Any, Any, str, str, int]] = {}
+    for binding in bindings:
+        rid_text = str(getattr(binding, "resource_id", "")).strip()
+        if not rid_text:
+            continue
+        binding_type = str(getattr(binding, "type", "")).strip().upper()
+        if binding_type not in {"UAV", "SRV"}:
+            continue
+        texture_desc = None
+        for key in _resource_id_tokens(rid_text):
+            texture_desc = by_resource_key.get(key)
+            if texture_desc is not None:
+                break
+        if texture_desc is None:
+            continue
+        resolved_rid = getattr(texture_desc, "resourceId", None)
+        if resolved_rid is None:
+            continue
+        binding_name = str(getattr(binding, "resource_name", "")).strip()
+        binding_index = _as_int(getattr(binding, "binding", 0), 0)
+        existing = candidates_by_key.get(str(resolved_rid))
+        if existing is not None and existing[2] == "UAV":
+            continue
+        candidates_by_key[str(resolved_rid)] = (
+            resolved_rid,
+            texture_desc,
+            binding_type,
+            binding_name,
+            binding_index,
+        )
+    return list(candidates_by_key.values())
 
 
 async def _get_texture_descriptor(
@@ -3788,9 +4678,20 @@ async def _recover_single_session_from_state(
         roots = await _offload(controller.GetRootActions)
         _, by_event = _build_action_index(roots)
         desired_event_id = int(session_record.get("active_event_id") or 0)
+        replay = ReplayHandle(
+            session_id=str(session_id),
+            capture_file_id=str(capture_file_id),
+            frame_index=int(session_record.get("frame_index") or 0),
+            active_event_id=0,
+        )
+        _runtime.replays[str(session_id)] = replay
         if desired_event_id <= 0 or desired_event_id not in by_event:
-            desired_event_id = _pick_default_event_id(roots)
-        if desired_event_id > 0:
+            desired_event_id = await _pick_previewable_default_event_id(
+                str(session_id),
+                roots,
+                fallback_event_id=_pick_default_event_id(roots),
+            )
+        elif desired_event_id > 0:
             await _offload(controller.SetFrameEvent, desired_event_id, True)
         replay = ReplayHandle(
             session_id=str(session_id),
@@ -4066,10 +4967,30 @@ async def runtime_startup() -> None:
     _record_log("info", "RDX runtime initialized")
 
 
-async def runtime_shutdown() -> None:
+async def runtime_shutdown(*, clear_context_state: bool = True) -> None:
     global _runtime_bootstrapped
     if not _runtime_bootstrapped:
         return
+    context_ids = sorted(
+        {normalize_context_id(item) for item in list(_runtime.context_states.keys())}
+        | {normalize_context_id(item) for item in list(_runtime.context_snapshots.keys())}
+        | {normalize_context_id(item) for item in list(_runtime.previews.keys())}
+        | {normalize_context_id(_runtime_context_id())}
+    )
+    for context_id in context_ids:
+        preview = _preview_state_value(context_id)
+        await _close_preview_binding(context_id)
+        if not clear_context_state and preview.get("enabled"):
+            _store_preview_state(
+                context_id,
+                _preview_update_payload(
+                    context_id,
+                    preview,
+                    enabled=True,
+                    state_name="stale",
+                    last_error="",
+                ),
+            )
     for debug_id in list(_runtime.shader_debugs.keys()):
         handle = _runtime.shader_debugs.pop(debug_id, None)
         if handle is not None:
@@ -4101,8 +5022,11 @@ async def runtime_shutdown() -> None:
     _runtime.session_owned_remotes.clear()
     _runtime.consumed_remotes.clear()
     _runtime.context_snapshots.clear()
+    _runtime.previews.clear()
     _runtime.context_states.clear()
     _runtime.hydrated_contexts.clear()
+    if clear_context_state:
+        _reset_context_snapshot()
     _runtime_bootstrapped = False
     _record_log("info", "RDX runtime shutdown complete")
 
@@ -4138,6 +5062,11 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
                 except Exception:
                     pass
         _runtime.shader_replacements.clear()
+        for context_id in list(_runtime.previews.keys()):
+            try:
+                await _close_preview_binding(context_id)
+            except Exception:
+                pass
         for sid in list(_runtime.replays.keys()):
             try:
                 await _session_manager.close_session(sid)
@@ -4156,6 +5085,7 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
         _runtime.session_owned_remotes.clear()
         _runtime.consumed_remotes.clear()
         _runtime.context_snapshots.clear()
+        _runtime.previews.clear()
         _runtime.context_states.clear()
         _runtime.hydrated_contexts.clear()
         _reset_context_snapshot()
@@ -4541,6 +5471,8 @@ def _tool_mutates_state(tool_name: str) -> bool:
         "rd.remote.connect",
         "rd.remote.disconnect",
         "rd.session.update_context",
+        "rd.session.open_preview",
+        "rd.session.close_preview",
         "rd.session.select_session",
         "rd.session.resume",
     )
@@ -4984,6 +5916,33 @@ def _release_runtime_owner_state(
     return _sync_context_snapshot_from_state(ctx)
 
 
+def _require_live_runtime_owner_access(context_id: str, args: Dict[str, Any]) -> None:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    current = dict(state.get("runtime_owner") or {})
+    current_agent = str(current.get("agent_id") or "").strip()
+    current_lease_id = str(current.get("lease_id") or "").strip()
+    current_status = str(current.get("status") or "unclaimed").strip() or "unclaimed"
+    if not current_agent or current_status != "claimed":
+        return
+    requested_agent = str(args.get("runtime_owner") or "").strip()
+    requested_lease_id = str(args.get("owner_lease_id") or "").strip()
+    if requested_agent == current_agent and requested_lease_id == current_lease_id:
+        return
+    raise CoreError(
+        code="runtime_owner_conflict",
+        message=f"context {ctx} is owned by {current_agent}",
+        category="runtime",
+        details={
+            "context_id": ctx,
+            "runtime_owner": current_agent,
+            "owner_lease_id": current_lease_id,
+            "requested_runtime_owner": requested_agent,
+            "requested_owner_lease_id": requested_lease_id,
+        },
+    )
+
+
 def _build_runtime_baton(context_id: str, *, task_goal: str, baton_id: str = "") -> Dict[str, Any]:
     ctx = normalize_context_id(context_id)
     snapshot = _context_snapshot(ctx)
@@ -5162,6 +6121,7 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
     context_id = normalize_context_id(args.get("context_id") or _runtime_context_id())
 
     if action == "get_context":
+        await _auto_sync_preview_if_enabled(context_id)
         snapshot = _context_snapshot(context_id)
         state = _sync_context_metrics(context_id)
         current_session_id = str(state.get("current_session_id") or "").strip()
@@ -5252,6 +6212,7 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
 
     if action == "clear_context":
         requested_context = normalize_context_id(args.get("target_context_id") or args.get("context_id") or context_id)
+        await _close_preview_binding(requested_context)
         snapshot = _reset_context_snapshot(requested_context)
         state = _context_state(requested_context)
         return _ok(
@@ -5276,6 +6237,26 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
             return _err(str(exc), code="validation_error", category="validation")
         snapshot = _store_context_snapshot(snapshot, context_id)
         return _ok(**snapshot)
+
+    if action == "open_preview":
+        requested_session_id = str(args.get("session_id") or "").strip()
+        try:
+            _require_live_runtime_owner_access(context_id, args)
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        try:
+            payload = await _open_context_preview(context_id, requested_session_id=requested_session_id)
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        return _ok(**payload)
+
+    if action == "close_preview":
+        try:
+            _require_live_runtime_owner_access(context_id, args)
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        payload = await _close_context_preview(context_id)
+        return _ok(**payload)
 
     if action == "list_sessions":
         state = _sync_context_metrics(context_id)
@@ -5664,14 +6645,19 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
             # misclassified as missing and surface as session_not_found.
             controller = _session_manager.get_controller(session_info.session_id)
             roots = await _offload(controller.GetRootActions)
-            active_event_id = int(getattr(roots[0], "eventId", 0)) if roots else 0
-            _progress("root_actions_loaded", "Frame actions loaded", progress_pct=0.91, details={"active_event_id": active_event_id})
             _runtime.replays[session_info.session_id] = ReplayHandle(
                 session_id=session_info.session_id,
                 capture_file_id=capture_file_id,
                 frame_index=0,
-                active_event_id=active_event_id,
+                active_event_id=0,
             )
+            active_event_id = await _pick_previewable_default_event_id(
+                session_info.session_id,
+                roots,
+                fallback_event_id=_pick_default_event_id(roots),
+            )
+            _runtime.replays[session_info.session_id].active_event_id = int(active_event_id or 0)
+            _progress("root_actions_loaded", "Frame actions loaded", progress_pct=0.91, details={"active_event_id": active_event_id})
             if remote_handle_for_session is not None:
                 _register_remote_session_lease(session_info.session_id, remote_handle_for_session)
             _set_context_runtime_session(
@@ -5742,9 +6728,11 @@ async def _dispatch_replay(action: str, args: Dict[str, Any]) -> str:
     if action == "set_frame":
         replay.frame_index = _as_int(args.get("frame_index"), 0)
         roots = await _offload(controller.GetRootActions)
-        active_event_id = _pick_default_event_id(roots)
-        if active_event_id > 0:
-            await _offload(controller.SetFrameEvent, active_event_id, True)
+        active_event_id = await _pick_previewable_default_event_id(
+            session_id,
+            roots,
+            fallback_event_id=_pick_default_event_id(roots),
+        )
         replay.active_event_id = active_event_id
         _set_context_frame(session_id, replay.frame_index, active_event_id)
         return _ok(active_event_id=active_event_id)
@@ -8811,66 +9799,12 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
         if event_id <= 0:
             event_id = await _ensure_event(session_id, None)
         explicit_target = target.get("texture_id") or target.get("textureId")
-        chosen_output_slot: Optional[int] = None
-        if explicit_target:
-            target_texture_id, texture_desc = await _get_texture_descriptor(
-                session_id,
-                explicit_target,
-                event_id=event_id,
-            )
-        else:
-            output_targets = await _output_target_resource_ids(session_id, event_id)
-            best_texture_id: Optional[Any] = None
-            best_score = float("-inf")
-            for candidate_id, candidate_slot in output_targets:
-                try:
-                    stats = await _render_service.get_texture_stats(
-                        session_id=session_id,
-                        event_id=event_id,
-                        texture_id=candidate_id,
-                        session_manager=_session_manager,
-                    )
-                    channels = _as_dict(stats.get("channels"), default={})
-                    rgb_spread = 0.0
-                    for channel in ("r", "g", "b"):
-                        cd = _as_dict(channels.get(channel), default={})
-                        cmin = cd.get("min")
-                        cmax = cd.get("max")
-                        if cmin is None or cmax is None:
-                            continue
-                        try:
-                            rgb_spread += abs(float(cmax) - float(cmin))
-                        except Exception:
-                            continue
-                    alpha = _as_dict(channels.get("a"), default={})
-                    try:
-                        alpha_spread = abs(float(alpha.get("max", 0.0)) - float(alpha.get("min", 0.0)))
-                    except Exception:
-                        alpha_spread = 0.0
-                    score = (rgb_spread * 10.0) + alpha_spread
-                    if not _as_bool(stats.get("has_any_nan"), False) and not _as_bool(stats.get("has_any_inf"), False):
-                        score += 0.1
-                    if score > best_score:
-                        best_score = score
-                        best_texture_id = candidate_id
-                        chosen_output_slot = candidate_slot
-                except Exception:
-                    continue
-
-            if best_texture_id is None:
-                if output_targets:
-                    best_texture_id, chosen_output_slot = output_targets[0]
-                else:
-                    best_texture_id, _ = await _get_texture_descriptor(
-                        session_id,
-                        None,
-                        event_id=event_id,
-                    )
-            target_texture_id, texture_desc = await _get_texture_descriptor(
-                session_id,
-                best_texture_id,
-                event_id=event_id,
-            )
+        target_texture_id, texture_desc, chosen_output_slot, target_source = await _choose_visual_output_target(
+            session_id,
+            event_id,
+            target=target,
+            allow_framebuffer_fallback=True,
+        )
         binding_index = await _binding_name_index_for_event(session_id, event_id)
         name_info = _compose_texture_name_info(
             target_texture_id,
@@ -8955,7 +9889,7 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
                 texture_format=_texture_format_name(texture_desc),
                 chosen_output_slot=chosen_output_slot,
                 texture_id=str(target_texture_id),
-                target_source="explicit_resource" if explicit_target else ("event_output_slot" if chosen_output_slot is not None else "framebuffer_fallback"),
+                target_source=target_source,
                 binding_truth_level=payload.get("binding_truth_level"),
                 visual_truth_level=payload.get("visual_truth_level"),
                 evidence_truth_level=payload.get("evidence_truth_level"),
@@ -8973,7 +9907,7 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
             texture_format=_texture_format_name(texture_desc),
             chosen_output_slot=chosen_output_slot,
             texture_id=str(target_texture_id),
-            target_source="explicit_resource" if explicit_target else ("event_output_slot" if chosen_output_slot is not None else "framebuffer_fallback"),
+            target_source=target_source,
             binding_truth_level=exports[0].get("binding_truth_level") if exports else "binding_degraded",
             visual_truth_level=exports[0].get("visual_truth_level") if exports else "visual_valid",
             evidence_truth_level=exports[0].get("evidence_truth_level") if exports else "visual_evidence_only",

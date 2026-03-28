@@ -613,3 +613,44 @@ def test_open_replay_rejects_estimated_memory_limit(tmp_path: Path) -> None:
     assert payload["ok"] is False
     assert payload["error"]["code"] == "replay_memory_limit_exceeded"
 
+
+def test_open_replay_uses_default_event_picker_for_initial_active_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    capture_path = tmp_path / "preview_default_event.rdc"
+    capture_path.write_text("rdc", encoding="utf-8")
+    server._runtime.captures = {
+        "capf_preview": server.CaptureFileHandle(
+            capture_file_id="capf_preview",
+            file_path=str(capture_path),
+            read_only=True,
+        )
+    }
+    fake_controller = _FakeRecoveryController([101, 355])
+    fake_manager = _FakeRecoverySessionManager(controller=fake_controller)
+
+    async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return fn(*args, **kwargs)
+
+    asyncio.run(server.server_runtime.runtime_startup())
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_pick_default_event_id", lambda actions: 202)
+    server.server_runtime._session_manager = fake_manager
+
+    payload = asyncio.run(
+        server.dispatch_operation(
+            "rd.capture.open_replay",
+            {"capture_file_id": "capf_preview", "options": {}},
+            transport="test",
+        )
+    )
+
+    assert payload["ok"] is True
+    session_id = payload["data"]["session_id"]
+    assert fake_controller.set_calls == [202]
+    assert server._runtime.replays[session_id].active_event_id == 202
+    state = server.server_runtime._context_state("default")
+    assert state["current_session_id"] == session_id
+    assert state["sessions"][session_id]["active_event_id"] == 202
+

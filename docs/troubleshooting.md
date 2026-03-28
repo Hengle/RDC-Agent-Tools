@@ -33,6 +33,9 @@ rdx context clear
   - 默认保留本地 `.rdc` 的持久化 session/capture 索引，便于后续 warm resume。
 - `rdx context clear`
   - 会显式销毁当前 context 的 snapshot 与持久化恢复状态。
+- 若当前 context 已开启 preview：
+  - `rdx daemon stop` 会关闭 live 窗口，但默认保留 preview enabled intent，后续同一 context 恢复 live session 时会自动重绑。
+  - `rdx context clear` 会关闭窗口并清掉该 intent。
 
 ## `scripts/` 主链
 
@@ -75,6 +78,39 @@ rdx.bat --non-interactive mcp --ensure-env
 - `daemon status` 读的是 daemon state，不等价于 runtime 内部对象，也不保证字段完全同构。
 - `rd.session.get_context` 适合排查当前链路视角，但它也不是“所有 runtime 内部对象的完整转储”。
 - `rd.session.list_sessions` / `rd.session.resume` 更适合排查“这个 context 还持有哪些本地 session 记录、哪些已经 degraded”。
+- `rd.session.get_context.preview` 只表示人类同步观察面的当前状态；它不是结构化证据，也不代表 fix verification 已成立。
+
+## preview 打不开或自动失效
+
+优先检查：
+
+- `rd.session.get_context.preview.enabled`
+- `rd.session.get_context.preview.state`
+- `rd.session.get_context.preview.last_error`
+- `rd.session.get_context.runtime.active_event_id`
+
+当前固定语义：
+
+- preview 只跟随当前 context 的 `current_session_id + active_event_id`
+- preview 不允许 silent fallback
+  - 不会悄悄从 remote 退回 local
+  - 不会悄悄从 `active_event` 退回 frame-end framebuffer
+  - 不会悄悄改成导出图片/轮询截图式伪预览
+
+因此，`preview.state=failed|stale` 时，应优先修 session / event / backend 条件，而不是把窗口输出当成平台主真相。
+
+## replay crash 后 preview 变成 `stale` / `reconnecting`
+
+这是预期路径之一。
+
+- preview 是 context 级 enabled intent，不是独立真相对象。
+- replay crash 或 session 失效时，旧窗口会被 runtime 主动关闭。
+- 若同一 context 后续 `resume` / rebind 成功，preview 会自动重绑，并在 `rd.session.get_context.preview` 中更新：
+  - `state`
+  - `recovered_from_session_id`
+  - `rebind_count`
+
+如果恢复失败，preview 会停在 `failed`，但这不会自动改写 canonical `rd.*` 的错误面。
 
 ## `rdx daemon status` 返回 `no active daemon`
 

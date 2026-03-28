@@ -45,7 +45,15 @@
 
 `intermediate/` 内容属于运行时产物，应视为非源码材料。
 
-## 5. 文档维护检查
+## 5. preview 运行约束
+
+- preview 只服务 Windows 本地可视化监控，不额外引入跨平台 UI 抽象。
+- preview 是 worker-owned 的人类观察窗口，不是 artifact，也不是新的持久化对象类型。
+- `rd.session.get_context.preview` 只暴露状态，不额外引入 `preview_id` 或第二套资源命名空间。
+- `rdx daemon stop` / worker 重启会关闭 live preview 窗口，但默认保留该 context 的 preview enabled intent。
+- `rd.session.close_preview`、`rd.core.shutdown` 与 `rdx context clear` 会关闭窗口并清掉该 intent。
+
+## 6. 文档维护检查
 
 文档变更后，建议至少执行：
 

@@ -41,7 +41,8 @@ rdx.bat
 在 `CLI` shell 中执行：
 
 ```bat
-rdx capture open --file "C:\path\capture.rdc" --frame-index 0
+rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --preview
+rdx session preview status
 rdx capture status
 rdx call rd.event.get_actions --args-file ".\args.json" --format json
 rdx daemon status
@@ -63,6 +64,19 @@ rdx daemon status
 `rdx capture open` 只负责建立当前 context 的 capture/session state，不会创建上层 framework 的 `workspace/case/run`。
 
 若后续要做清理，推荐顺序是先 `rd.capture.close_replay`，再 `rd.capture.close_file`。当 capture 仍被 live replay 持有时，`rd.capture.close_file` 会返回失败而不是静默移除 handle。
+若需要给人类同步观察当前 active event，可继续使用：
+
+```bat
+rdx session preview on
+rdx session preview status
+rdx session preview off
+```
+
+补充语义：
+
+- preview 固定绑定当前 context 的 `current_session_id + active_event_id`。
+- `rd.session.get_context.preview` 是唯一公开状态源。
+- preview 只承担 human observer 角色，不参与 fix verification / evidence 裁决。
 
 如果后续要把同一条链路交给上层 Agent 继续使用，建议额外查看：
 
@@ -104,6 +118,7 @@ rdx context clear
 `exit` / `quit` 只退出当前 shell，不会自动停止 daemon，也不会自动清理 context。
 `rdx daemon stop` 只停止 daemon，默认保留本地 `.rdc` 的持久化恢复状态。
 `rdx context clear` 才会显式销毁当前 context 的持久化 session/capture 索引与 snapshot。
+若当前 context 已开启 preview，`rdx daemon stop` 会关闭 live 窗口但保留 enabled intent；同一 context 后续恢复 live session 时会自动重绑。`rdx context clear` 与 `rd.core.shutdown` 则会关闭窗口并清掉该 intent。
 
 ## 3. 对接 `MCP` client
 

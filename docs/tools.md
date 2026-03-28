@@ -62,6 +62,8 @@
 - `rd.vfs.resolve`
 - `rd.session.get_context`
 - `rd.session.update_context`
+- `rd.session.open_preview`
+- `rd.session.close_preview`
 - `rd.session.create_context`
 - `rd.session.list_contexts`
 - `rd.session.select_context`
@@ -90,10 +92,12 @@
 其中 `rd.session.*` 用于暴露 context snapshot：
 
 - 读取当前 context 的 runtime / remote / focus / recent artifacts 状态。
+- 读取当前 context 的 preview observer 状态；唯一入口是 `rd.session.get_context.preview`。
 - 读取并切换 `current_session_id` 与 `sessions` 表。
 - 暴露 `recovery`、`limits`、`active_operation` 与 `recent_operations`。
 - 让上层 Agent 只补充 user-owned 字段，例如 `focus_pixel`、`focus_resource_id`、`focus_shader_id`、`notes`。
 - 不允许人工或 Agent 通过它们直接篡改 runtime-owned 字段，如 `session_id`、`capture_file_id`、`active_event_id`、`remote_id`。
+- `rd.session.open_preview` / `rd.session.close_preview` 只负责给人类打开或关闭同步监控窗口；它们不引入新的 public id，也不改变 canonical `rd.*` 的真相层级。
 
 其中新增 `rd.core.*` discovery / observability 入口用于：
 

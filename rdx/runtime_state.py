@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import msvcrt
 
-from rdx.context_snapshot import normalize_context_id
+from rdx.context_snapshot import default_preview_state, normalize_context_id, normalize_preview_state
 from rdx.io_utils import atomic_append_jsonl, atomic_write_json
 from rdx.runtime_paths import cli_runtime_dir
 
@@ -162,6 +162,7 @@ def default_context_state(context: Optional[str] = "default", *, limits: Any = N
             "degraded_session_ids": [],
             "last_error": "",
         },
+        "preview": default_preview_state(),
         "limits": payload_limits,
         "recent_operations": [],
         "metrics": {
@@ -394,6 +395,10 @@ def normalize_context_state(
             "last_error": str(recovery.get("last_error") or "").strip(),
         }
 
+    state["preview"] = normalize_preview_state(
+        payload.get("preview"),
+        backend=str(state.get("backend") or "local"),
+    )
     payload_limits = payload.get("limits")
     if isinstance(payload_limits, dict):
         merged_limits = dict(state["limits"])

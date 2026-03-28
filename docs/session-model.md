@@ -15,6 +15,7 @@
 -> capture_file_id
 -> session_id
 -> frame_index / active_event_id
+-> preview (optional human observer)
 -> inspection / export / diff / assert
 ```
 
@@ -58,6 +59,10 @@ remote endpoint
 - `context snapshot`
   - `rd.session.get_context` 返回的 context 级快照。
   - 它汇总当前 runtime 选中的 `session_id`、`capture_file_id`、remote 生命周期、focus 与 recent artifacts，供 Agent 长链调用复用。
+- `preview`
+  - 绑定当前 context 的人类同步观察窗口。
+  - 固定跟随 `current_session_id + active_event_id`。
+  - 它是 human observer，不是新的 runtime truth，也不是 fix verification / evidence 输入。
 - `persistent context state`
   - daemon-backed 持久化索引，保存当前 context 的 `captures`、`sessions`、`current_session_id`、`recovery`、`limits` 与 `recent_operations`。
   - daemon 重启后，本地与可恢复 remote session 的恢复都以它为准；`context snapshot` 只是当前视角投影。
@@ -68,7 +73,7 @@ remote endpoint
 
 - `rd.session.get_context`
   - 读取当前 context 的只读快照。
-  - 返回 `runtime`、`remote`、`focus`、`last_artifacts`、`runtime_parallelism_ceiling` 等结构化状态。
+  - 返回 `runtime`、`remote`、`focus`、`last_artifacts`、`preview`、`runtime_parallelism_ceiling` 等结构化状态。
 - `rd.session.update_context`
   - 只允许补充 user-owned 字段，例如：
     - `focus_pixel`
@@ -81,6 +86,11 @@ remote endpoint
     - `active_event_id`
     - `remote_id`
     - `last_artifacts`
+- `rd.session.open_preview`
+  - 为当前 context 的 current session 打开或重绑定 preview。
+  - 如果给了 `session_id`，它必须和当前 context 的 current session 一致；否则应先 `rd.session.select_session`。
+- `rd.session.close_preview`
+  - 关闭当前 context 的 preview，并清除该 context 的 preview enabled intent。
 - `rd.session.list_sessions`
   - 返回当前 context 的 session 表、`current_session_id` 与 `runtime_parallelism_ceiling`。
 - `rd.session.select_session`
@@ -135,7 +145,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 
 ## 4. 状态面与来源优先级
 
-`rdx-tools` 至少存在四类彼此相关但不等价的状态面：
+`rdx-tools` 至少存在五类彼此相关但不等价的状态面：
 
 - daemon 状态（daemon state）
   - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
@@ -143,6 +153,10 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
   - 真正的 replay、debug、active event、controller 等进程内对象。
 - context 快照（context snapshot）
   - 供 Agent 或自动化读取的 context 级快照，汇总 runtime / remote / focus / recent artifacts。
+- preview 观察面（preview observer）
+  - 只给人类同步看当前 active event 的可视结果。
+  - 公开状态固定通过 `rd.session.get_context.preview` 暴露。
+  - 它不会升级成 runtime truth，也不会替代 canonical `rd.*` 证据。
 - persistent context state
   - 记录 `captures`、`sessions`、`current_session_id`、`recovery`、`limits` 与 `recent_operations`，是本地恢复与多 session 选择的持久化真相。
 
@@ -161,6 +175,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 - `daemon status` 读的是 daemon state，不等于“直接遍历所有 runtime 内部对象”。
 - `rd.session.get_context` 读的是当前 context 的快照与持久化索引组合视图，不等于“直接遍历所有 runtime 内部对象”。
 - `rd.session.list_sessions` / `rd.session.resume` 面向持久化状态索引，不等于“直接遍历所有 runtime 内部对象”。
+- `rd.session.get_context.preview` 读的是当前 context 的 preview observer 状态，不等于“当前窗口一定存在且可替代结构化证据”。
 - 真正的 live replay/debug 对象存在于 runtime 内部对象层，不能简单由某一份状态文件完全代表。
 - `last_artifacts` 是有界 recent index，而不是 artifact 仓库本身；当前 retention policy 默认为 `total_limit=32`、`per_type_limit=8`。
 - remote 相关的真实能力面不会再被压扁进 `runtime_parallelism_ceiling`；需要区分 remote endpoint / replay / event-bound inspection / shader debug / shader replace / shader compile / fix verification 时，应读取 `rd.session.get_context -> remote_capability_matrix`。
@@ -187,6 +202,8 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 - 一个 context 现在可以同时持有多条本地 session 记录；`current_session_id` 只表示当前选中的工作面，而不是该 context 唯一能存在的 session。
 - 上层 Agent 如果要跨多轮任务持续工作，优先复用同一 context，而不是把 handle 当作永久主键缓存。
 - `rdx daemon stop` 只停止 daemon，不会清空该 context 的本地恢复索引；真正销毁状态要执行 `rdx context clear` 或 `rd.core.shutdown`。
+- preview 是 context 级 enabled intent：`rdx daemon stop` / worker 重启会关闭 live 窗口，但保留 enabled intent；后续同一 context 恢复 live session 时会自动重绑。
+- `rd.session.close_preview`、`rdx context clear` 与 `rd.core.shutdown` 会关闭窗口并清掉该 intent。
 - remote 一律采用 `single_runtime_owner`；高能力平台的差异只体现在 local 是否允许 multi-context 并行，而不是允许多个 owner 共享同一条 remote live runtime。
 
 补充一条入口选择原则：

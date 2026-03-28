@@ -29,6 +29,7 @@
 - `capture_file_id`、`session_id` 是运行时句柄，不是长期稳定标识。
 - remote 路径的 `remote_id` 是 context-local live handle；不能跨 context 复用，也不能把它当作可无限复用的长期句柄。
 - 长链任务如果没有 context snapshot，模型很容易忘记上一轮 focus 与 artifact 路径。
+- `rd.session.get_context.preview` 只是人类同步观察状态；它不是新的 runtime truth，不得替代 canonical `rd.*` 证据。
 - 一个 context 现在可以持有多条本地 session 记录；如果 Agent 只记住单个 `session_id`，很容易把“当前选中 session”和“context 持有的全部 session”混为一谈。
 - 不是所有底层 RenderDoc `eventId` 都能回灌到 `rd.event.*`；上层必须区分 canonical `event_id` 与 `raw_event_id`。
 - 不要在 replay 仍存活时提前调用 `rd.capture.close_file`；推荐清理顺序是先 `rd.capture.close_replay`，再关闭对应 capture handle。
@@ -75,6 +76,9 @@
 - 显式保存关键状态。
   - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.list_sessions` / `rd.session.update_context` 维护 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+- 如果用户要求同步观察当前 active event，可额外使用 `rd.session.open_preview` / `rd.session.close_preview`。
+  - preview 只给人类看，不作为 fix verification、session truth 或 gate 输入。
+  - preview 失败不会自动把 platform truth 降级成 local/framebuffer/export fallback。
 - 多 session context 下显式选择 current session。
 - 当 `rd.session.list_sessions` 返回多条记录时，后续 inspection 前优先通过 `rd.session.select_session` 锁定当前工作面。
 - 若任务要并行拆成多条 live 链路，应显式创建和列举 context，而不是把多个 owner 塞进同一个 context。
@@ -123,6 +127,7 @@
 - 失败时先看共享契约。
 - 先检查 `ok` 与 `error.message`。
 - 如果需要归因，再看 `error.details.source_layer`、`classification`、`capture_context`、`renderdoc_status`。
+- 对 preview 相关失败，优先把它当作“人类监控面失败”而不是“平台主真相失效”。
 - 对长耗时操作，优先看 progress/status，而不是把“静默等待”当作失败信号。
 - 对最近动作与恢复尝试，优先看结构化历史而不是日志猜测。
   - `rd.core.get_operation_history` 返回 trace-linked 最近调用。

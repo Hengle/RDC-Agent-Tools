@@ -43,6 +43,30 @@ def _write_stdout(text: str) -> None:
     safe_stream_write(text + "\n", sys.stdout)
 
 
+def _print_launcher_help() -> None:
+    for line in (
+        "usage: python cli/run_cli.py <command> [--daemon-context <id>] ...",
+        "commands:",
+        "  daemon start|stop|status",
+        "  context clear",
+        "  session preview on|off|status",
+        "  call <operation> [--args-json ... | --args-file ...] [--format json|tsv] [--remote]",
+        "  capture open|status",
+        "  vfs ls|cat|tree|resolve",
+        "  diff pipeline|image",
+        "  assert pipeline|image",
+        "",
+        "examples:",
+        "  python cli/run_cli.py daemon start --daemon-context local",
+        "  python cli/run_cli.py context clear --daemon-context local",
+        "  python cli/run_cli.py capture open --file D:\\path\\capture.rdc --frame-index 0 --preview",
+        "  python cli/run_cli.py session preview on",
+        "  python cli/run_cli.py call rd.session.get_context --args-file .\\args.json --format json",
+        "  python cli/run_cli.py vfs ls --path / --format tsv",
+    ):
+        _write_stdout(line)
+
+
 def _exception_error_payload(result_kind: str, exc: Exception, *, transport: str = "cli") -> Dict[str, Any]:
     code = str(getattr(exc, "code", "") or "runtime_error")
     category = str(getattr(exc, "category", "") or "runtime")
@@ -494,6 +518,21 @@ async def _cmd_capture_open(args: argparse.Namespace) -> int:
             )
         )
         return EXIT_RUNTIME_ERR
+    if bool(getattr(args, "preview", False)):
+        preview_payload = _daemon_exec("rd.session.open_preview", {}, context=context)
+        if not bool(preview_payload.get("ok")):
+            _print_json(
+                _capture_open_error_payload(
+                    step="open_preview",
+                    context=context,
+                    file_path=file_path,
+                    capture_file_id=capture_file_id,
+                    session_id=session_id,
+                    source_payload=preview_payload,
+                )
+            )
+            return EXIT_RUNTIME_ERR
+        context_payload = _daemon_exec("rd.session.get_context", {}, context=context)
     runtime_snapshot = context_payload.get("data", {}).get("runtime", {}) if isinstance(context_payload.get("data"), dict) else {}
     payload = canonical_success(
         result_kind="rdx.capture.open",
@@ -532,6 +571,40 @@ def _cmd_capture_status(args: argparse.Namespace) -> int:
     )
     _print_json(payload)
     return EXIT_OK
+
+
+async def _cmd_session_preview(args: argparse.Namespace) -> int:
+    context = str(args.daemon_context)
+    if args.session_preview_cmd == "on":
+        call_args: Dict[str, Any] = {}
+        if getattr(args, "session_id", None):
+            call_args["session_id"] = str(args.session_id)
+        payload = _daemon_exec("rd.session.open_preview", call_args, context=context)
+        _print_json(payload)
+        return EXIT_OK if bool(payload.get("ok")) else EXIT_RUNTIME_ERR
+    if args.session_preview_cmd == "off":
+        payload = _daemon_exec("rd.session.close_preview", {}, context=context)
+        _print_json(payload)
+        return EXIT_OK if bool(payload.get("ok")) else EXIT_RUNTIME_ERR
+    if args.session_preview_cmd == "status":
+        payload = _daemon_exec("rd.session.get_context", {}, context=context)
+        if not bool(payload.get("ok")):
+            _print_json(payload)
+            return EXIT_RUNTIME_ERR
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        result = canonical_success(
+            result_kind="rdx.session.preview.status",
+            data={
+                "context_id": str(data.get("context_id") or context),
+                "current_session_id": str(data.get("current_session_id") or ""),
+                "preview": dict(data.get("preview") or {}),
+                "runtime": dict(data.get("runtime") or {}),
+            },
+            transport="cli",
+        )
+        _print_json(result)
+        return EXIT_OK
+    raise RuntimeError("unsupported session preview command")
 
 
 async def _cmd_diff_pipeline(args: argparse.Namespace) -> int:
@@ -673,7 +746,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_capture_open.add_argument("--file", required=True)
     p_capture_open.add_argument("--frame-index", type=int, default=0)
     p_capture_open.add_argument("--artifact-dir", default=str(artifacts_dir().resolve()))
+    p_capture_open.add_argument("--preview", action="store_true")
     s_capture.add_parser("status")
+
+    p_session = sub.add_parser("session", help="Session helpers")
+    s_session = p_session.add_subparsers(dest="session_cmd", required=True)
+    p_session_preview = s_session.add_parser("preview", help="Human preview controls")
+    s_session_preview = p_session_preview.add_subparsers(dest="session_preview_cmd", required=True)
+    p_session_preview_on = s_session_preview.add_parser("on")
+    p_session_preview_on.add_argument("--session-id", default=None)
+    s_session_preview.add_parser("off")
+    s_session_preview.add_parser("status")
 
     p_vfs = sub.add_parser("vfs", help="Read-only VFS navigation helpers")
     s_vfs = p_vfs.add_subparsers(dest="vfs_cmd", required=True)
@@ -806,6 +889,10 @@ async def _main_async(args: argparse.Namespace) -> int:
             return await _cmd_capture_open(args)
         if args.capture_cmd == "status":
             return _cmd_capture_status(args)
+
+    if args.command == "session":
+        if args.session_cmd == "preview":
+            return await _cmd_session_preview(args)
 
     if args.command == "diff":
         if args.diff_cmd == "pipeline":

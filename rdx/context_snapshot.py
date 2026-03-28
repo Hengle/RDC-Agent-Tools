@@ -30,6 +30,7 @@ RUNTIME_OWNED_KEYS = {
     "remote_id",
     "origin_remote_id",
     "last_artifacts",
+    "preview",
 }
 _CONTEXT_MUTEXES: dict[str, threading.Lock] = {}
 _CONTEXT_MUTEXES_LOCK = threading.Lock()
@@ -43,6 +44,48 @@ class SnapshotRetentionPolicy:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def default_preview_state(*, backend: str = "local", enabled: bool = False) -> Dict[str, Any]:
+    return {
+        "enabled": bool(enabled),
+        "state": "disabled" if not enabled else "starting",
+        "view_mode": "active_event",
+        "bound_session_id": "",
+        "bound_capture_file_id": "",
+        "bound_event_id": 0,
+        "backend": str(backend or "local").strip() or "local",
+        "recovered_from_session_id": "",
+        "rebind_count": 0,
+        "last_error": "",
+        "updated_at_ms": _now_ms(),
+    }
+
+
+def normalize_preview_state(value: Any, *, backend: str = "local") -> Dict[str, Any]:
+    payload = default_preview_state(backend=backend)
+    if not isinstance(value, dict):
+        return payload
+    enabled = bool(value.get("enabled", payload["enabled"]))
+    state = str(value.get("state") or payload["state"]).strip() or payload["state"]
+    if not enabled:
+        state = "disabled"
+    payload.update(
+        {
+            "enabled": enabled,
+            "state": state,
+            "view_mode": "active_event",
+            "bound_session_id": str(value.get("bound_session_id") or "").strip(),
+            "bound_capture_file_id": str(value.get("bound_capture_file_id") or "").strip(),
+            "bound_event_id": _normalize_int(value.get("bound_event_id")),
+            "backend": str(value.get("backend") or backend or "local").strip() or "local",
+            "recovered_from_session_id": str(value.get("recovered_from_session_id") or "").strip(),
+            "rebind_count": max(0, _normalize_int(value.get("rebind_count"))),
+            "last_error": str(value.get("last_error") or "").strip(),
+            "updated_at_ms": _normalize_int(value.get("updated_at_ms"), _now_ms()),
+        }
+    )
+    return payload
 
 
 def _context_mutex(context: Optional[str]) -> threading.Lock:
@@ -173,6 +216,7 @@ def default_context_snapshot(context: Optional[str] = "default") -> Dict[str, An
         },
         "notes": "",
         "last_artifacts": [],
+        "preview": default_preview_state(),
         "updated_at_ms": _now_ms(),
     }
 
@@ -364,6 +408,10 @@ def normalize_context_snapshot(
                 normalized.append(entry)
         snapshot["last_artifacts"] = _trim_artifacts(normalized, retention=retention_policy)
 
+    snapshot["preview"] = normalize_preview_state(
+        payload.get("preview"),
+        backend=str(snapshot.get("backend") or "local"),
+    )
     snapshot["updated_at_ms"] = _normalize_int(payload.get("updated_at_ms"), _now_ms())
     return snapshot
 

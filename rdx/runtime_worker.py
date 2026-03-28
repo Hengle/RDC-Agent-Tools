@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 continue
             if method == "shutdown":
-                asyncio.run(server.runtime_shutdown())
+                asyncio.run(server.runtime_shutdown(clear_context_state=False))
                 _emit({"id": req_id, "ok": True, "result": {"stopped": True}})
                 return 0
             _emit({"id": req_id, "ok": False, "error": {"message": f"unknown worker method: {method}"}})

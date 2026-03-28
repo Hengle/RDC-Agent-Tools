@@ -18,6 +18,7 @@
 - event-bound pipeline / shader / export / debug 如何表达 `resolved_event_id`，以及何时必须显式失败而不是回退。
 - 上层 Agent / framework 的责任边界在哪里。
 - 本地恢复索引、session 表与最近操作历史的规范入口是什么。
+- 人类同步观察窗口如何绑定 `context/current_session_id/active_event_id`，以及它为什么不是平台主真相。
 
 ## 2. 分层职责表
 
@@ -77,7 +78,7 @@
 
 ### session / context / daemon 语义变更
 
-如果改动影响 `.rdc -> session` 链路、`context`、daemon、session state、artifact、context snapshot、persistent context state、错误恢复路径，至少检查：
+如果改动影响 `.rdc -> session` 链路、`context`、daemon、session state、artifact、context snapshot、persistent context state、preview observer 或错误恢复路径，至少检查：
 
 - `docs/session-model.md`
 - `docs/quickstart.md`
@@ -119,6 +120,7 @@
 - 如果 `remote_id` 被写入文档，必须说明 remote `open_replay` 成功后它是否仍保持 live、何时会看到 `active_session_ids`、以及何时应返回 `remote_handle_in_use` / `remote_handle_consumed`。
 - 如果文档写到 remote session 恢复，必须说明“优先复用原 `session_id`”与“只有 endpoint 真断开、bootstrap 失败或恢复元数据缺失时才显式 `degraded`”。
 - 如果 catalog 已公开 `rd.session.get_context` / `rd.session.update_context`，核心文档中必须能找到它们的角色说明。
+- 如果 catalog 已公开 `rd.session.open_preview` / `rd.session.close_preview`，核心文档中必须写清 preview 是 human observer、`rd.session.get_context.preview` 是唯一公开状态源，以及它不进入 fix verification / evidence 裁决链。
 - 如果 catalog 已公开 `rd.session.list_sessions` / `rd.session.select_session` / `rd.session.resume`，核心文档中必须说明“一个 context 可持有多条 session 记录”和“`current_session_id` 只表示当前工作面”。
 - 如果 catalog 已公开 `rd.core.get_operation_history` / `rd.core.get_runtime_metrics` / `rd.core.list_tools` / `rd.core.search_tools` / `rd.core.get_tool_graph`，核心文档中必须说明它们的 discovery / observability 职责边界。
 - 如果文档写到 `event_id`，必须区分 canonical action event 与底层 `raw_event_id`；不得暗示任意 RenderDoc 原始 `eventId` 都能直接喂回 `rd.event.set_active`。

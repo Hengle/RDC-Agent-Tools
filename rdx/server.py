@@ -120,6 +120,8 @@ async def dispatch_operation(
         )
         try:
             await server_runtime.ensure_context_ready(chosen_context_id)
+            if operation not in {"rd.session.open_preview", "rd.session.close_preview"}:
+                await server_runtime._auto_sync_preview_if_enabled(chosen_context_id)
             payload = await _get_core_engine().execute(operation, call_args, context=ctx)
             if isinstance(payload, dict):
                 server_runtime._postprocess_context_snapshot(operation, call_args, payload, ctx)
@@ -134,6 +136,8 @@ async def dispatch_operation(
                 trace_id=ctx.trace_id,
                 transport=ctx.transport,
             )
+        if operation not in {"rd.session.open_preview", "rd.session.close_preview"}:
+            await server_runtime._auto_sync_preview_if_enabled(chosen_context_id)
         server_runtime._record_operation_finish(
             chosen_context_id,
             trace_id=ctx.trace_id,

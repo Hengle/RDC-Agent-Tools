@@ -24,19 +24,22 @@
 2. 通过 canonical `rd.*` tools 做事件、管线、资源、纹理、shader、debug、export 等结构化读取与操作。
 3. 用 `rd.macro.*` 承载常见高阶分析工作流。
 4. 用 `rd.session.*` / `rd.core.*` 管理 context、恢复与 discovery。
-5. 用 `rd.vfs.*` 做只读浏览与路径式导航。
-6. 用 `tabular/tsv projection` 提供表格化摘要输出。
+5. 用 context 绑定的 preview 给人类提供同步观察窗口；它是 human observer，不进入平台真相裁决链。
+6. 用 `rd.vfs.*` 做只读浏览与路径式导航。
+7. 用 `tabular/tsv projection` 提供表格化摘要输出。
 
 补充口径：
 
 - 主调试接口始终是 canonical `rd.*`。
 - `rd.vfs.*` 是只读导航层，用于浏览结构，不替代正式调试接口。
 - `tabular/tsv projection` 是结果展示投影，用于提升扫描效率，不是新的规范能力面，也不表示语义重要度排序。
+- `rd.session.open_preview` / `rd.session.close_preview` 只负责给人类打开或关闭 context 绑定的同步监控窗口；`rd.session.get_context.preview` 是唯一公开状态源。
+- preview 固定跟随当前 context 的 `current_session_id + active_event_id`，不是 `qrenderdoc` 替身，也不是 fix verification / evidence 输入。
 - `rd.texture.get_data` 的默认语义是数值 readback 容器，不是图片导出。
 - 需要直接打开的纹理图片时，统一使用 `rd.export.texture`。
 - `runtime_mode_truth.json` 只定义 transport/runtime ceiling，不定义平台是否具备 team agents。
-- local multi-context ? runtime ceiling????????????? `concurrent_team`??????? Frameworks ??? `staged_handoff` ?? orchestrated multi-context?
-- Tools ????? ceiling???? local ceiling ?? `staged_handoff` ? agent ???? context?? `concurrent_team` ? team-agents ???? Frameworks ???????
+- local multi-context 只表示 runtime ceiling；上层是否把它消费成 `concurrent_team` 或 `staged_handoff` 的 orchestrated multi-context，取决于 `Frameworks`。
+- `Tools` 只暴露 runtime ceiling 与 context 语义；是否采用 team-agents、如何做 `staged_handoff` 或多 context 编排，由上层 `Frameworks` 决定。
 
 ## 规范源优先级
 
@@ -88,6 +91,7 @@ daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问
 - 暴露 catalog 当前定义的全部 `rd.*` tools；数量以 `spec/tool_catalog.json` 的 `tool_count` 为准。
 - 新增只读 `rd.vfs.*` 导航层，用于以 JSON-first 方式探索 draw/pass/resource/pipeline/context 结构。
 - 已公开包含 `rd.session.get_context`、`rd.session.update_context`、`rd.session.list_sessions`、`rd.session.select_session`、`rd.session.resume`。
+- 已公开包含 `rd.session.open_preview`、`rd.session.close_preview`；preview 状态固定通过 `rd.session.get_context.preview` 读取。
 - 已公开包含 `rd.core.get_operation_history`、`rd.core.get_runtime_metrics`、`rd.core.list_tools`、`rd.core.search_tools`、`rd.core.get_tool_graph`。
 - catalog 现已为 tool 提供结构化 `prerequisites`，上层 Agent 应在调用前优先做静态前置检查，而不是依赖试错。
 - 由上层 client 进行 tool discovery、参数组织与调用编排。
@@ -111,7 +115,8 @@ daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问
 下面的示例只演示平台级最小入口：
 
 ```bat
-python cli/run_cli.py capture open --file "C:\path\capture.rdc" --frame-index 0
+python cli/run_cli.py capture open --file "C:\path\capture.rdc" --frame-index 0 --preview
+python cli/run_cli.py session preview status
 python cli/run_cli.py call rd.session.get_context --args-file ".\args.json" --format json
 python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 ```
@@ -132,6 +137,9 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - `rd.shader.compile` 现在是 session-aware tool：可显式传 `session_id` 与 `source_encoding`，并通过返回里的 `supported_source_encodings` 判断当前 replay backend 接受哪类源码；返回还会显式区分 `runtime_replacement_supported` 与 compile 本身是否可用。
 - `rd.remote.set_overlay_options` 在当前 `RenderDoc` Python binding 未暴露 overlay RPC 时，会返回显式 `remote_overlay_options_unavailable`，而不是静默成功。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+- 人类同步监控窗口固定通过 `rd.session.open_preview` 建立，并把状态写入 `rd.session.get_context.preview`。
+- preview 是 context 级 enabled intent：session 切换、resume、replay 重建后会自动重绑；`rd.session.close_preview`、`rd.core.shutdown` 与 `rdx context clear` 会关闭窗口并清掉该 intent。
+- preview 不允许 silent fallback：不能悄悄从 remote 掉回 local，也不能悄悄从 `active_event` 退回 frame-end framebuffer 或导出轮询。
 - 一个 context 现在可持有多条本地 session 记录；`rd.session.get_context` 会同时返回 `current_session_id`、`sessions`、`recovery`、`limits` 与 `recent_operations`。
 - 现已公开 `rd.session.create_context`、`rd.session.list_contexts`、`rd.session.select_context`、`rd.session.clear_context`，把 multi-context 变成正式 public surface，而不是 CLI 侧隐式约定。
 - 现已公开 `rd.session.claim_runtime_owner` / `rd.session.release_runtime_owner`；当 context 已 claim owner 时，live `rd.*` 调用必须提供匹配的 `runtime_owner` 与 `owner_lease_id`，否则返回 `runtime_owner_conflict`。
