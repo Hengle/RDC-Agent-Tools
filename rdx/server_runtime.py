@@ -1,4 +1,4 @@
-﻿"""
+"""
 RDX daemon/runtime server with registry-driven tool registration.
 
 - Registers all catalog-defined tools from `rdx/spec/tool_catalog.json`
@@ -2939,7 +2939,31 @@ def _disconnect_remote_handle_sync(handle: RemoteHandle) -> List[str]:
             errors.append(f"remote shutdown failed: {exc}")
     if handle.transport == "adb_android" and handle.bootstrap_result is not None:
         errors.extend(cleanup_android_remote(handle.bootstrap_result))
+    handle.connected = False
+    handle.remote_server = None
+    handle.detail["connected"] = False
     return errors
+
+
+def _mark_remote_handle_disconnected(handle: RemoteHandle) -> None:
+    handle.connected = False
+    handle.remote_server = None
+    handle.detail["connected"] = False
+
+
+def _is_remote_endpoint_failure(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    markers = (
+        "network i/o",
+        "disconnected",
+        "connection",
+        "remote",
+        "endpoint",
+        "eof",
+        "broken pipe",
+        "timed out",
+    )
+    return any(marker in text for marker in markers)
 
 
 _CAPTURE_OPTION_ATTRS: Dict[str, str] = {
@@ -3119,6 +3143,7 @@ def _drain_target_control_messages_sync(
                 continue
             break
         if message_type == "Disconnected":
+            _mark_remote_handle_disconnected(handle)
             events.append(event)
             break
         if message_type in {"NewCapture", "CaptureCopied"}:
@@ -4931,7 +4956,6 @@ async def _recover_single_session_from_state(
             session_record,
         )
         remote_endpoint = str(remote_handle_for_session.detail.get("endpoint") or _remote_url(remote_handle_for_session.host, remote_handle_for_session.port))
-        _runtime.remotes[str(remote_handle_for_session.remote_id)] = remote_handle_for_session
         backend_config = {
             "type": "remote",
             "host": remote_handle_for_session.host,
@@ -6983,7 +7007,13 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                 pass
             _runtime.replays.pop(session_info.session_id, None)
             if remote_handle_for_session is not None:
+                remote_error = False
+                exc_obj = sys.exc_info()[1]
+                if isinstance(exc_obj, Exception):
+                    remote_error = _is_remote_endpoint_failure(exc_obj)
                 _release_remote_session_lease(session_info.session_id)
+                if remote_error:
+                    _mark_remote_handle_disconnected(remote_handle_for_session)
                 _set_context_remote_live(remote_id, remote_endpoint)
             raise
     if action == "close_replay":
@@ -11885,7 +11915,7 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         try:
             status = await _offload(handle.remote_server.Ping)
         except Exception as exc:
-            handle.connected = False
+            _mark_remote_handle_disconnected(handle)
             return _err(
                 f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {exc}",
                 code="remote_ping_failed",
@@ -11902,7 +11932,7 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             )
         latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
         if not _status_ok(status):
-            handle.connected = False
+            _mark_remote_handle_disconnected(handle)
             details = build_renderdoc_error_details(
                 status,
                 operation=f"RemoteServer.Ping({_remote_url(handle.host, handle.port)})",

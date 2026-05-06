@@ -422,6 +422,7 @@ def test_session_resume_restores_persisted_remote_session_and_metadata(
     assert fake_controller.set_calls == [202]
     assert server._runtime.session_owned_remotes["sess_remote"].device_serial == "e38b8019"
     assert server._runtime.remotes["remote_origin"].leased_session_ids == ["sess_remote"]
+    assert list(server._runtime.remotes.keys()) == ["remote_origin"]
     assert "remote_origin" not in server._runtime.consumed_remotes
     state = server.server_runtime._context_state("default")
     assert state["sessions"]["sess_remote"]["remote"]["device_serial"] == "e38b8019"

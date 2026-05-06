@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -53,6 +53,26 @@ class FakeController:
         return SimpleNamespace(pipelineType="Vulkan")
 
 
+class FakeDisconnectedMessage:
+    def __init__(self) -> None:
+        self.type = 0
+
+
+class FakeDisconnectedControl:
+    def __init__(self, rd_module: object) -> None:
+        self._rd = rd_module
+        self._delivered = False
+
+    def ReceiveMessage(self, _unused: object) -> FakeDisconnectedMessage:
+        message = FakeDisconnectedMessage()
+        if self._delivered:
+            message.type = int(getattr(self._rd.TargetControlMessageType, "Noop"))
+        else:
+            self._delivered = True
+            message.type = int(getattr(self._rd.TargetControlMessageType, "Disconnected"))
+        return message
+
+
 class FakeSessionManager:
     def __init__(self) -> None:
         self.backend_config: dict[str, object] | None = None
@@ -71,6 +91,11 @@ class FakeSessionManager:
 
     def get_controller(self, session_id: str) -> FakeController:
         return self.controller
+
+
+class FakeOpenReplayFailSessionManager(FakeSessionManager):
+    async def open_capture(self, session_id: str, path: str) -> SimpleNamespace:
+        raise RuntimeError("Network I/O operation failed")
 
 
 class FakeMeshFormat:
@@ -301,6 +326,90 @@ def test_dispatch_capture_open_replay_keeps_live_remote_handle(monkeypatch) -> N
         assert context_payload["remote_handle_origin_context"] == "default"
         assert context_payload["remote_capability_matrix"]["endpoint"]["status"] == "verified"
         assert context_payload["remote_capability_matrix"]["fix_verification"]["status"] == "blocked_current_session"
+    finally:
+        clear_context_snapshot()
+        server._runtime.context_snapshots.clear()
+        server.server_runtime._session_manager = original_session_manager
+        server._runtime.captures = original_captures
+        server._runtime.replays = original_replays
+        server._runtime.remotes = original_remotes
+        server._runtime.session_owned_remotes = original_session_owned
+        server._runtime.consumed_remotes = original_consumed
+
+
+def test_drain_target_control_disconnected_marks_remote_handle_dead() -> None:
+    handle = server.RemoteHandle(
+        remote_id="remote_demo",
+        host="127.0.0.1",
+        port=38960,
+        connected=True,
+        transport="adb_android",
+        remote_server=DummyRemoteServer(),
+        detail={"connected": True},
+    )
+    rd_module = server.server_runtime._get_rd()
+    control = FakeDisconnectedControl(rd_module)
+
+    events = server.server_runtime._drain_target_control_messages_sync(
+        handle,
+        control,
+        target_id="1",
+    )
+
+    assert events[0]["type"] == "Disconnected"
+    assert handle.connected is False
+    assert handle.remote_server is None
+    assert handle.detail["connected"] is False
+
+
+def test_dispatch_capture_open_replay_remote_network_failure_marks_handle_disconnected(monkeypatch) -> None:
+    original_session_manager = server.server_runtime._session_manager
+    original_captures = dict(server._runtime.captures)
+    original_replays = dict(server._runtime.replays)
+    original_remotes = dict(server._runtime.remotes)
+    original_session_owned = dict(server._runtime.session_owned_remotes)
+    original_consumed = dict(server._runtime.consumed_remotes)
+    fake_manager = FakeOpenReplayFailSessionManager()
+
+    async def _inline_offload(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    server.server_runtime._session_manager = fake_manager
+    server._runtime.captures = {
+        "capf_demo": server.CaptureFileHandle(capture_file_id="capf_demo", file_path="capture.rdc", read_only=True)
+    }
+    server._runtime.replays = {}
+    server._runtime.remotes = {
+        "remote_demo": server.RemoteHandle(
+            remote_id="remote_demo",
+            host="127.0.0.1",
+            port=38960,
+            connected=True,
+            transport="adb_android",
+            remote_server=DummyRemoteServer(),
+            detail={"connected": True},
+        )
+    }
+    server._runtime.session_owned_remotes = {}
+    server._runtime.consumed_remotes = {}
+    clear_context_snapshot()
+    server._runtime.context_snapshots.clear()
+
+    try:
+        payload = json.loads(
+            asyncio.run(
+                server._dispatch_capture(
+                    "open_replay",
+                    {"capture_file_id": "capf_demo", "options": {"remote_id": "remote_demo"}},
+                )
+            )
+        )
+        assert payload["success"] is False
+        assert payload["code"] == "internal_error"
+        assert server._runtime.remotes["remote_demo"].connected is False
+        assert server._runtime.remotes["remote_demo"].remote_server is None
+        assert server._runtime.remotes["remote_demo"].detail["connected"] is False
     finally:
         clear_context_snapshot()
         server._runtime.context_snapshots.clear()
