@@ -38,5 +38,5 @@ For visible smoke, use bash so every CLI command and result appears in the agent
 bash scripts/smoke_cli.sh
 ```
 
-`rdx-tools` is CLI-only. Agents must not expect an MCP server, MCP transport, or built-in RDC ToolBridge MCP descriptor from this package.
+`rdx-tools` is CLI-only. Agents should integrate through shell commands and the canonical JSON envelope.
 

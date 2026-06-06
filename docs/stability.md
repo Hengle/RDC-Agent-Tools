@@ -41,5 +41,4 @@ Compatibility policy:
 - TSV is a stable tabular projection only where a command documents table output, such as `vfs ls`.
 - `--daemon-context <id>` selects a continuous runtime namespace; omitting it uses `default`.
 - Breaking changes require a 2.0 release.
-- MCP entrypoints are intentionally unsupported and are not part of the compatibility surface.
 
