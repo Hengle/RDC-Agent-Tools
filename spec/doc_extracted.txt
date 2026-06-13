@@ -669,7 +669,7 @@
 0722: 返回结果
 0723: rd.remote.connect
 0724: 连接到远程 RenderDoc server（RDC remote server / target control）。
-0725: host (str)<br>port (int, 可选, 默认 38920)<br>timeout_ms (int, 可选, 默认 5000)
+0725: host (str, renderdoc transport required; adb_android optional)<br>port (int, optional, default 38920)<br>timeout_ms (int, optional, default 5000)<br>options (dict, optional): {transport?: 'renderdoc'|'adb_android', device_serial?, local_port?, install_apk?, push_config?}
 0726: success (bool)<br>remote_id (str)<br>server_info (dict): {version, name?, platform?, capabilities?}<br>error_message (str, 可选)
 0727: rd.remote.disconnect
 0728: 断开远程连接。
@@ -841,7 +841,6 @@
 0960: 四，总结
 0961: 本文通过对 RenderDoc UI 的精细解构和功能映射，详细抽象并实现了RenderDoc CLI runtime，使其从“可用”到“专家级”的跨越。它为 AI Agent 提供了前所未有的对Renderdoc的控制粒度，使其能够模拟人类专家的完整调试流程，包括复杂的视图交互、状态设置和多窗口协同。这套工具集是实现真正智能图形调试 Agent 的坚实基础。
 0962: 五，后续补充
-0963: 当前公开的 context / owner / baton 工具补充为：rd.session.create_context、rd.session.list_contexts、rd.session.select_context、rd.session.clear_context、rd.session.claim_runtime_owner、rd.session.release_runtime_owner、rd.session.export_runtime_baton、rd.session.rehydrate_runtime_baton。
-0964: multi-context 已是正式 public surface；remote 统一采用 single_runtime_owner，live rd.* 调用在 context 已 claim owner 时必须带匹配的 runtime_owner 与 owner_lease_id。
-0965: spec/runtime_mode_truth.json 只定义 transport/runtime ceiling；local 为 multi_context_multi_owner，remote 为 single_runtime_owner。
-0966: 平台是否能把 local multi-context 用成 concurrent_team，不由 Tools 定义，而由上层 Frameworks 的 platform matrix 决定。
+0963: 当前公开的 context 工具补充为：rd.session.create_context、rd.session.list_contexts、rd.session.select_context、rd.session.clear_context。
+0964: multi-context 是 CLI 隔离 public surface；调用方通过 context_id 或 --daemon-context 选择隔离命名空间。
+0965: remote handle 继续保持 context locality 与 consumed lifecycle 保护；上层任务归属、交接与并发策略不由 Tools 定义。

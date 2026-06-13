@@ -172,10 +172,6 @@ def _daemon_state_excerpt(state: Dict[str, Any]) -> Dict[str, Any]:
     ):
         if key in state:
             excerpt[key] = state.get(key)
-    if isinstance(state.get("runtime_owner"), dict):
-        excerpt["runtime_owner"] = dict(state.get("runtime_owner") or {})
-    if isinstance(state.get("owner_lease"), dict):
-        excerpt["owner_lease"] = dict(state.get("owner_lease") or {})
     return excerpt
 
 
@@ -238,18 +234,23 @@ def _normalize_daemon_state_payload(payload: Dict[str, Any], context: Optional[s
     state["capture_count"] = int(payload.get("capture_count") or 0)
     state["recovery_status"] = str(payload.get("recovery_status") or "").strip()
     state["backend"] = str(payload.get("backend") or "local").strip() or "local"
-    runtime_owner = payload.get("runtime_owner")
-    state["runtime_owner"] = dict(runtime_owner) if isinstance(runtime_owner, dict) else {}
-    owner_lease = payload.get("owner_lease")
-    state["owner_lease"] = dict(owner_lease) if isinstance(owner_lease, dict) else {}
-    worker = payload.get("worker")
-    state["worker"] = dict(worker) if isinstance(worker, dict) else {
+    worker = payload.get("worker") if isinstance(payload.get("worker"), dict) else {}
+    state["worker"] = {
         "running": False,
         "pid": 0,
-        "runtime_id": "",
-        "cache_root": "",
+        "binaries_dir": "",
+        "pymodules_dir": "",
         "source_manifest": "",
     }
+    state["worker"].update(
+        {
+            "running": bool(worker.get("running")),
+            "pid": int(worker.get("pid") or 0),
+            "binaries_dir": str(worker.get("binaries_dir") or ""),
+            "pymodules_dir": str(worker.get("pymodules_dir") or ""),
+            "source_manifest": str(worker.get("source_manifest") or ""),
+        }
+    )
     return state
 
 

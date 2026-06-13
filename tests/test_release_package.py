@@ -4,7 +4,9 @@ import json
 import zipfile
 from pathlib import Path
 
-from scripts import package_release
+import pytest
+
+from scripts import package_release, verify_release_package
 
 
 def _write(path: Path, content: str = "ok\n") -> None:
@@ -59,3 +61,23 @@ def test_package_release_builds_self_contained_zip(tmp_path: Path, monkeypatch) 
     assert "pyproject.toml" in manifest_paths
     assert "uv.lock" not in manifest_paths
     assert not any(path == "tests" or path.startswith("tests/") for path in manifest_paths)
+
+
+def test_verify_release_package_rejects_pre_ga_payload_path(tmp_path: Path) -> None:
+    package = tmp_path / "rdx-tools-1.0.0-windows-x64.zip"
+    legacy_path = "rdx-tools/rdx/" + "runtime_" + "materializer.py"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(legacy_path, "legacy\n")
+
+    with pytest.raises(RuntimeError, match="pre-GA path"):
+        verify_release_package._verify_no_legacy_payload(package)
+
+
+def test_verify_release_package_rejects_pre_ga_payload_marker(tmp_path: Path) -> None:
+    package = tmp_path / "rdx-tools-1.0.0-windows-x64.zip"
+    legacy_marker = "worker_" + "materialize"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("rdx-tools/binaries/windows/x64/manifest.runtime.json", '{"flag":"' + legacy_marker + '"}')
+
+    with pytest.raises(RuntimeError, match="pre-GA marker"):
+        verify_release_package._verify_no_legacy_payload(package)

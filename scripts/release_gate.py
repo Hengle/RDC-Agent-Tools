@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,7 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from rdx.python_runtime import validate_bundled_python_layout
+from scripts import package_release as release_packager
 from scripts._shared import run_subprocess, tools_root, write_text
 
 
@@ -32,7 +34,6 @@ REQUIRED_DIRS = [
     "binaries/windows/x64/python",
     "binaries/windows/x64/pymodules",
     "intermediate/runtime/rdx_cli",
-    "intermediate/runtime/worker-cache",
     "intermediate/runtime/worker-state",
     "intermediate/artifacts",
     "intermediate/pytest",
@@ -330,7 +331,67 @@ def _check_release_package(root: Path, *, raw_package: str, required: bool) -> t
     ok, detail = _run(verify_cmd, cwd=root)
     if not ok:
         return False, detail
-    return True, f"verified release package: {package_path.name}"
+    ok_match, match_detail = _check_package_matches_source(root, package_path)
+    if not ok_match:
+        return False, match_detail
+    return True, f"verified release package: {package_path.name}; {match_detail}"
+
+
+def _release_source_manifest(root: Path) -> list[dict[str, object]]:
+    allowed_roots = release_packager.RELEASE_ROOT_FILES | release_packager.RELEASE_DIRS
+    entries: list[dict[str, object]] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_dir() or release_packager._should_skip(path, root):  # noqa: SLF001
+            continue
+        rel = path.relative_to(root)
+        if not rel.parts or rel.parts[0] not in allowed_roots:
+            continue
+        entries.append(
+            {
+                "path": rel.as_posix(),
+                "size": int(path.stat().st_size),
+                "sha256": _sha256(path),
+            }
+        )
+    return entries
+
+
+def _check_package_matches_source(root: Path, package_path: Path) -> tuple[bool, str]:
+    try:
+        with zipfile.ZipFile(package_path, "r") as archive:
+            payload = json.loads(archive.read("rdx-tools/RELEASE_MANIFEST.json").decode("utf-8"))
+    except Exception as exc:
+        return False, f"release package manifest unreadable: {exc}"
+
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return False, "release package manifest files field is missing or invalid"
+
+    expected = {str(item["path"]): item for item in _release_source_manifest(root)}
+    actual: dict[str, dict[str, object]] = {}
+    for item in files:
+        if not isinstance(item, dict):
+            return False, "release package manifest contains a non-object file entry"
+        rel = str(item.get("path") or "")
+        if not rel:
+            return False, "release package manifest contains an empty file path"
+        actual[rel] = item
+
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    if missing or extra:
+        return False, (
+            "release package is stale relative to source tree; "
+            f"missing={missing[:5]} extra={extra[:5]}"
+        )
+
+    for rel, exp in expected.items():
+        got = actual[rel]
+        got_size = got.get("size")
+        if got_size is None or int(got_size) != int(exp["size"]) or str(got.get("sha256") or "").lower() != str(exp["sha256"]):
+            return False, f"release package is stale relative to source tree: {rel}"
+
+    return True, f"source manifest matched {len(expected)} files"
 
 
 def main(argv: list[str] | None = None) -> int:

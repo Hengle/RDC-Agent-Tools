@@ -2,7 +2,7 @@
 
 Agents should treat `rdx-tools` as CLI-only. Use `rdx.bat`, `bin/rdx`, or `python cli/run_cli.py`.
 
-Read state with `rdx context status` before acting, and write scoped notes or focus with `rdx context update`. Keep `session_locator` in staged_handoff messages so another agent can resume the same capture/session/event. Local backends allow orchestrated multi-context work; remote backends require stricter ownership checks.
+Read state with `rdx context status` before acting, and write scoped notes or focus with `rdx context update`. `session_locator` summarizes the active capture/session/event for the selected daemon context. Multiple daemon contexts are isolated from each other, and the caller chooses which context id to use.
 
 Use VFS as the runtime exploration layer: start with `rdx vfs ls --path / --format tsv`, then use `rdx vfs tree --path / --depth 2 --format json` or `rdx vfs cat --path /context --format json` before choosing precise `rd.*` tools. JSON is canonical; TSV is only for tabular navigation and list projections.
 

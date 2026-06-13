@@ -92,10 +92,6 @@ def cli_runtime_dir() -> Path:
     return runtime_root() / "rdx_cli"
 
 
-def worker_cache_dir() -> Path:
-    return runtime_root() / "worker-cache"
-
-
 def worker_state_dir() -> Path:
     return runtime_root() / "worker-state"
 
@@ -117,7 +113,6 @@ def ensure_runtime_dirs() -> None:
         intermediate_root(),
         runtime_root(),
         cli_runtime_dir(),
-        worker_cache_dir(),
         worker_state_dir(),
         artifacts_dir(),
         pytest_dir(),

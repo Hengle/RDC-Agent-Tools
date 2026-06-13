@@ -139,7 +139,6 @@ def test_capture_open_wraps_open_replay_failure_with_step_state(monkeypatch, tmp
                     "session_id": "",
                     "capture_file_id": "capf_demo",
                     "active_request_count": 1,
-                    "runtime_owner": {"agent_id": "", "lease_id": "", "status": "unclaimed"},
                 },
             },
         },
@@ -271,7 +270,6 @@ def test_capture_open_wraps_get_context_exception_with_step_state(monkeypatch, t
                     "session_id": "sess_demo",
                     "capture_file_id": "capf_demo",
                     "active_request_count": 1,
-                    "runtime_owner": {"agent_id": "rdc-debugger", "lease_id": "lease_demo", "status": "claimed"},
                 },
             },
         },
@@ -292,7 +290,7 @@ def test_capture_open_wraps_get_context_exception_with_step_state(monkeypatch, t
     assert captured[0]["ok"] is False
     assert captured[0]["error"]["details"]["failed_step"] == "get_context"
     assert captured[0]["error"]["details"]["session_id"] == "sess_demo"
-    assert captured[0]["error"]["details"]["daemon_state"]["runtime_owner"]["agent_id"] == "rdc-debugger"
+    assert captured[0]["error"]["details"]["daemon_state"]["active_request_count"] == 1
     assert captured[0]["error"]["details"]["context_snapshot"]["ok"] is False
 
 

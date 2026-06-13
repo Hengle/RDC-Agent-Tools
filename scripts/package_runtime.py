@@ -243,7 +243,7 @@ def _existing_bundled_python_metadata(out_root: Path) -> dict[str, str]:
     return metadata
 
 
-def _iter_manifest_files(out_root: Path) -> Iterable[tuple[Path, bool]]:
+def _iter_manifest_files(out_root: Path) -> Iterable[Path]:
     for path in sorted(out_root.rglob("*")):
         if not path.is_file():
             continue
@@ -255,25 +255,24 @@ def _iter_manifest_files(out_root: Path) -> Iterable[tuple[Path, bool]]:
         if path.suffix.lower() in DENY_SUFFIXES:
             continue
         if rel.startswith("python/"):
-            yield path, False
+            yield path
             continue
         if rel.startswith("pymodules/"):
-            yield path, True
+            yield path
             continue
         if "/" in rel:
             continue
         if path.name.lower().startswith("python"):
             continue
-        yield path, True
+        yield path
 
 
-def _manifest_entry(path: Path, out_root: Path, *, worker_materialize: bool) -> dict[str, object]:
+def _manifest_entry(path: Path, out_root: Path) -> dict[str, object]:
     rel = path.relative_to(out_root).as_posix()
     return {
         "path": rel,
         "size": int(path.stat().st_size),
         "sha256": _sha256(path),
-        "worker_materialize": bool(worker_materialize),
     }
 
 
@@ -333,10 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         bundled_python = _existing_bundled_python_metadata(out_root)
 
-    manifest_entries = [
-        _manifest_entry(path, out_root, worker_materialize=worker_materialize)
-        for path, worker_materialize in _iter_manifest_files(out_root)
-    ]
+    manifest_entries = [_manifest_entry(path, out_root) for path in _iter_manifest_files(out_root)]
 
     if not manifest_entries:
         print("[pack] no runtime files found to package")

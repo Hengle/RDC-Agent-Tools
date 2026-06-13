@@ -260,7 +260,7 @@ def test_close_preview_clears_enabled_intent(monkeypatch: pytest.MonkeyPatch) ->
     assert payload["data"]["preview"]["state"] == "disabled"
 
 
-def test_open_preview_respects_runtime_owner_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_open_preview_uses_selected_context(monkeypatch: pytest.MonkeyPatch) -> None:
     save_context_state(
         {
             "context_id": "ctx-preview",
@@ -322,46 +322,17 @@ def test_open_preview_respects_runtime_owner_gate(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(server.server_runtime, "ensure_context_ready", _fake_ready)
     monkeypatch.setattr(server.server_runtime, "_sync_context_preview", _fake_sync_preview)
 
-    claimed = asyncio.run(
-        server.dispatch_operation(
-            "rd.session.claim_runtime_owner",
-            {
-                "runtime_owner": "rdc-debugger",
-                "context_id": "ctx-preview",
-                "entry_mode": "cli",
-                "backend": "local",
-            },
-            transport="test",
-        )
-    )
-    assert claimed["ok"] is True
-    lease_id = claimed["data"]["owner_lease"]["lease_id"]
-
-    blocked = asyncio.run(
+    opened = asyncio.run(
         server.dispatch_operation(
             "rd.session.open_preview",
             {"context_id": "ctx-preview"},
             transport="test",
         )
     )
-    assert blocked["ok"] is False
-    assert blocked["error"]["code"] == "runtime_owner_conflict"
-
-    allowed = asyncio.run(
-        server.dispatch_operation(
-            "rd.session.open_preview",
-            {
-                "context_id": "ctx-preview",
-                "runtime_owner": "rdc-debugger",
-                "owner_lease_id": lease_id,
-            },
-            transport="test",
-        )
-    )
-    assert allowed["ok"] is True
-    assert allowed["data"]["preview"]["enabled"] is True
-    assert allowed["data"]["preview"]["state"] == "live"
-    assert allowed["data"]["preview"]["display"]["output_slot"] == 0
+    assert opened["ok"] is True
+    assert opened["data"]["preview"]["enabled"] is True
+    assert opened["data"]["preview"]["state"] == "live"
+    assert opened["data"]["preview"]["display"]["output_slot"] == 0
 
 
 def test_choose_visual_output_target_uses_event_binding_texture_when_outputs_are_empty(

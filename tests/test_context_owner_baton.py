@@ -8,7 +8,23 @@ import pytest
 
 from rdx import server
 from rdx.context_snapshot import clear_context_snapshot
-from rdx.runtime_state import clear_context_state, save_context_state
+from rdx.runtime_state import clear_context_state
+
+
+REMOVED_CONTEXT_FIELDS = {
+    "runtime_" + "owner",
+    "owner_" + "lease",
+    "active_" + "baton",
+    "rehydrate_" + "status",
+    "runtime_" + "parallelism_" + "ceiling",
+    "entry_" + "mode",
+}
+REMOVED_SESSION_TOOLS = {
+    "rd.session.claim_" + "runtime_" + "owner",
+    "rd.session.release_" + "runtime_" + "owner",
+    "rd.session.export_" + "runtime_" + "baton",
+    "rd.session.rehydrate_" + "runtime_" + "baton",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +38,7 @@ def _reset_runtime_state() -> None:
     original_session_manager = server.server_runtime._session_manager
     original_bootstrapped = server.server_runtime._runtime_bootstrapped
     original_config = server.server_runtime._config
-    for context_id in ("default", "ctx-alpha", "ctx-baton"):
+    for context_id in ("default", "ctx-alpha"):
         clear_context_snapshot(context_id)
         clear_context_state(context_id)
     server._runtime.captures.clear()
@@ -34,7 +50,7 @@ def _reset_runtime_state() -> None:
     try:
         yield
     finally:
-        for context_id in ("default", "ctx-alpha", "ctx-baton"):
+        for context_id in ("default", "ctx-alpha"):
             clear_context_snapshot(context_id)
             clear_context_state(context_id)
         server._runtime.captures = original_captures
@@ -73,15 +89,16 @@ def test_context_lifecycle_tools_round_trip() -> None:
     assert default_snapshot["ok"] is True
     assert default_snapshot["data"]["context_id"] == "default"
     assert default_snapshot["data"]["notes"] == ""
-    assert default_snapshot["data"]["runtime_parallelism_ceiling"] == "multi_context_multi_owner"
     assert default_snapshot["data"]["session_locator"] == {"rdc_path": "", "session_id": "", "frame_index": 0, "active_event_id": 0}
+    assert REMOVED_CONTEXT_FIELDS.isdisjoint(default_snapshot["data"])
 
     listed = asyncio.run(server.dispatch_operation("rd.session.list_contexts", {}, transport="test"))
     assert listed["ok"] is True
-    context_ids = {item["context_id"] for item in listed["data"]["contexts"]}
+    contexts = listed["data"]["contexts"]
+    context_ids = {item["context_id"] for item in contexts}
     assert {"default", "ctx-alpha"} <= context_ids
-    assert all(item["runtime_parallelism_ceiling"] == "multi_context_multi_owner" for item in listed["data"]["contexts"])
-    assert all("session_locator" in item for item in listed["data"]["contexts"])
+    assert all("session_locator" in item for item in contexts)
+    assert all(REMOVED_CONTEXT_FIELDS.isdisjoint(item) for item in contexts)
 
     selected = asyncio.run(
         server.dispatch_operation(
@@ -93,6 +110,7 @@ def test_context_lifecycle_tools_round_trip() -> None:
     assert selected["ok"] is True
     assert selected["data"]["selected_context_id"] == "ctx-alpha"
     assert selected["data"]["notes"] == "alpha-notes"
+    assert REMOVED_CONTEXT_FIELDS.isdisjoint(selected["data"])
 
     cleared = asyncio.run(
         server.dispatch_operation(
@@ -104,128 +122,10 @@ def test_context_lifecycle_tools_round_trip() -> None:
     assert cleared["ok"] is True
     assert cleared["data"]["context_id"] == "ctx-alpha"
     assert cleared["data"]["notes"] == ""
+    assert REMOVED_CONTEXT_FIELDS.isdisjoint(cleared["data"])
 
 
-def test_claim_runtime_owner_blocks_live_tool_without_matching_lease(tmp_path: Path) -> None:
-    capture_path = tmp_path / "owner-check.rdc"
-    capture_path.write_text("dummy capture", encoding="utf-8")
-
-    claimed = asyncio.run(
-        server.dispatch_operation(
-            "rd.session.claim_runtime_owner",
-            {"runtime_owner": "rdc-debugger", "entry_mode": "cli", "backend": "local"},
-            transport="test",
-        )
-    )
-    assert claimed["ok"] is True
-    lease_id = claimed["data"]["owner_lease"]["lease_id"]
-    assert lease_id
-
-    blocked = asyncio.run(
-        server.dispatch_operation(
-            "rd.capture.open_file",
-            {"file_path": str(capture_path), "read_only": True},
-            transport="test",
-        )
-    )
-    assert blocked["ok"] is False
-    assert blocked["error"]["code"] == "runtime_owner_conflict"
-
-    allowed = asyncio.run(
-        server.dispatch_operation(
-            "rd.capture.open_file",
-            {
-                "file_path": str(capture_path),
-                "read_only": True,
-                "runtime_owner": "rdc-debugger",
-                "owner_lease_id": lease_id,
-            },
-            transport="test",
-        )
-    )
-    if allowed["ok"] is False:
-        assert allowed["error"]["code"] != "runtime_owner_conflict"
-
-
-def test_runtime_baton_export_and_rehydrate_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    capture_path = tmp_path / "baton.rdc"
-    capture_path.write_text("baton capture", encoding="utf-8")
-    save_context_state(
-        {
-            "context_id": "ctx-baton",
-            "current_capture_file_id": "capf_baton",
-            "current_session_id": "sess_baton",
-            "captures": {
-                "capf_baton": {
-                    "capture_file_id": "capf_baton",
-                    "file_path": str(capture_path),
-                    "read_only": True,
-                }
-            },
-            "sessions": {
-                "sess_baton": {
-                    "session_id": "sess_baton",
-                    "capture_file_id": "capf_baton",
-                    "rdc_path": str(capture_path),
-                    "frame_index": 0,
-                    "active_event_id": 77,
-                    "backend_type": "local",
-                    "state": "active",
-                    "is_live": True,
-                }
-            },
-        },
-        "ctx-baton",
-    )
-
-    exported = asyncio.run(
-        server.dispatch_operation(
-            "rd.session.export_runtime_baton",
-            {"task_goal": "confirm hotspot source", "context_id": "ctx-baton"},
-            transport="test",
-        )
-    )
-    assert exported["ok"] is True
-    baton_id = exported["data"]["baton_id"]
-    artifact_path = Path(exported["data"]["artifact_path"])
-    assert baton_id
-    assert artifact_path.is_file()
-    assert exported["data"]["session_locator"]["rdc_path"] == str(capture_path)
-    assert exported["data"]["session_locator"]["session_id"] == "sess_baton"
-    assert exported["data"]["session_locator"]["active_event_id"] == 77
-    assert exported["data"]["baton"]["session_locator"]["rdc_path"] == str(capture_path)
-
-    calls: list[tuple[str, str]] = []
-
-    async def _fake_recover(context_id: str, session_id: str, *, trace_id: str = "") -> dict[str, str]:
-        calls.append((context_id, session_id))
-        return {"session_id": session_id}
-
-    monkeypatch.setattr(server.server_runtime, "_recover_single_session_from_state", _fake_recover)
-
-    rehydrated = asyncio.run(
-        server.dispatch_operation(
-            "rd.session.rehydrate_runtime_baton",
-            {"baton_id": baton_id, "context_id": "ctx-baton"},
-            transport="test",
-        )
-    )
-    assert rehydrated["ok"] is True
-    assert rehydrated["data"]["active_baton"]["baton_id"] == baton_id
-    assert rehydrated["data"]["rehydrate_status"]["status"] == "succeeded"
-    assert calls == [("ctx-baton", "sess_baton")]
-
-
-def test_runtime_mode_truth_declares_runtime_ceiling_only() -> None:
-    payload = json.loads((Path(__file__).resolve().parents[1] / "spec" / "runtime_mode_truth.json").read_text(encoding="utf-8"))
-    modes = payload["modes"]
-    assert modes["local_cli"]["runtime_parallelism_ceiling"] == "multi_context_multi_owner"
-    assert modes["remote_cli"]["runtime_parallelism_ceiling"] == "single_runtime_owner"
-    assert modes["remote_cli"]["host_coordination_gate"] == "frameworks_platform_matrix_applies"
-    assert {mode["entry_mode"] for mode in modes.values()} == {"cli"}
-
-
-def test_docs_and_catalog_distinguish_runtime_ceiling_from_platform_coordination() -> None:
+def test_docs_and_catalog_describe_context_isolation_without_coordination_contracts() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     readme = (repo_root / "README.md").read_text(encoding="utf-8-sig")
     session_doc = (repo_root / "docs" / "session-model.md").read_text(encoding="utf-8-sig")
@@ -233,13 +133,22 @@ def test_docs_and_catalog_distinguish_runtime_ceiling_from_platform_coordination
     catalog = json.loads((repo_root / "spec" / "tool_catalog.json").read_text(encoding="utf-8-sig"))
     tools = {item["name"]: item for item in catalog.get("tools") or []}
 
-    assert "staged_handoff" in readme
-    assert "orchestrated multi-context" in readme
-    assert "session_locator" in readme
-    assert "staged_handoff" in session_doc
-    assert "session_locator" in session_doc
-    assert "session_locator" in agent_doc
-    assert "orchestrated multi-context" in agent_doc
+    forbidden_doc_terms = {
+        "staged_" + "handoff",
+        "orchestrated multi-" + "context",
+        "stricter ownership",
+        "single_" + "runtime_" + "owner",
+        "multi_" + "context_multi_owner",
+    }
+    for text in (readme, session_doc, agent_doc):
+        assert "session_locator" in text
+        assert all(term not in text for term in forbidden_doc_terms)
+
+    assert REMOVED_SESSION_TOOLS.isdisjoint(tools)
     assert "session_locator" in tools["rd.session.get_context"]["returns_raw"]
     assert "session_locator" in tools["rd.session.list_contexts"]["returns_raw"]
-    assert "session_locator" in tools["rd.session.export_runtime_baton"]["returns_raw"]
+    for tool in tools.values():
+        param_names = {str(name) for name in tool.get("param_names", [])}
+        assert {"runtime_" + "owner", "owner_" + "lease_id", "baton_" + "id"}.isdisjoint(param_names)
+        returns_raw = str(tool.get("returns_raw") or "")
+        assert all(field not in returns_raw for field in REMOVED_CONTEXT_FIELDS)

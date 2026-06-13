@@ -9,27 +9,16 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rdx.io_utils import safe_json_text
-from rdx.runtime_materializer import MaterializedRuntime, materialize_runtime
+from rdx.runtime_paths import binaries_root, pymodules_dir
 from rdx.runtime_worker_state import clear_worker_state, save_worker_state
 
 
 READY_TIMEOUT_S = 10.0
 REQUEST_TIMEOUT_S = 30.0
-
-
-@dataclass
-class WorkerSnapshot:
-    context_id: str
-    pid: int
-    running: bool
-    runtime_id: str
-    cache_root: str
-    source_manifest: str
 
 
 class RuntimeWorkerProcess:
@@ -40,7 +29,7 @@ class RuntimeWorkerProcess:
         self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._io_lock = threading.Lock()
         self._request_seq = 0
-        self._runtime: Optional[MaterializedRuntime] = None
+        self._runtime: Optional[Dict[str, str]] = None
 
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -50,9 +39,9 @@ class RuntimeWorkerProcess:
         return {
             "running": self.is_running(),
             "pid": int(self._proc.pid) if self._proc and self.is_running() else 0,
-            "runtime_id": runtime.runtime_id if runtime else "",
-            "cache_root": str(runtime.cache_root) if runtime else "",
-            "source_manifest": str(runtime.source_manifest) if runtime else "",
+            "binaries_dir": runtime.get("binaries_dir", "") if runtime else "",
+            "pymodules_dir": runtime.get("pymodules_dir", "") if runtime else "",
+            "source_manifest": runtime.get("source_manifest", "") if runtime else "",
         }
 
     def _save_state(self) -> None:
@@ -78,14 +67,19 @@ class RuntimeWorkerProcess:
         self._queue.put({"kind": "eof"})
 
     def _spawn(self) -> None:
-        runtime = materialize_runtime()
+        bin_dir = binaries_root().resolve()
+        pymod_dir = pymodules_dir().resolve()
+        manifest_path = (bin_dir / "manifest.runtime.json").resolve()
+        runtime = {
+            "binaries_dir": str(bin_dir),
+            "pymodules_dir": str(pymod_dir),
+            "source_manifest": str(manifest_path),
+        }
         env = dict(os.environ)
         env["RDX_CONTEXT_ID"] = self.context_id
-        env["RDX_RUNTIME_DLL_DIR"] = str(runtime.binaries_dir)
-        env["RDX_RENDERDOC_PATH"] = str(runtime.pymodules_dir)
-        env["RDX_WORKER_RUNTIME_ID"] = runtime.runtime_id
-        env["RDX_WORKER_CACHE_ROOT"] = str(runtime.cache_root)
-        env["RDX_WORKER_SOURCE_MANIFEST"] = str(runtime.source_manifest)
+        env["RDX_RUNTIME_DLL_DIR"] = runtime["binaries_dir"]
+        env["RDX_RENDERDOC_PATH"] = runtime["pymodules_dir"]
+        env["RDX_WORKER_SOURCE_MANIFEST"] = runtime["source_manifest"]
 
         tools_root = str(env.get("RDX_TOOLS_ROOT", "")).strip()
         if tools_root:

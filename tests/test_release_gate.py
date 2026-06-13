@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import json
+import zipfile
 from pathlib import Path
 
 from scripts import release_gate
@@ -243,6 +245,11 @@ def test_release_gate_verifies_release_package_when_present(monkeypatch, tmp_pat
 
     _mock_release_gate_basics(monkeypatch, tmp_path)
     monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
+    monkeypatch.setattr(
+        release_gate,
+        "_check_package_matches_source",
+        lambda root, package_path: (True, "source manifest matched 1 files"),
+    )
 
     rc = release_gate.main(
         [
@@ -257,3 +264,54 @@ def test_release_gate_verifies_release_package_when_present(monkeypatch, tmp_pat
     assert rc == 0
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "PASS `release:package`" in report
+
+
+def test_release_gate_rejects_stale_release_package_manifest(tmp_path: Path) -> None:
+    source = tmp_path / "rdx.bat"
+    source.write_text("new\n", encoding="utf-8")
+    package = tmp_path / "dist" / "rdx-tools-1.0.0-windows-x64.zip"
+    package.parent.mkdir(parents=True, exist_ok=True)
+    stale_manifest = {
+        "name": "rdx-tools",
+        "version": "1.0.0",
+        "platform": "windows-x64",
+        "entrypoints": ["rdx.bat"],
+        "file_count": 1,
+        "files": [
+            {
+                "path": "rdx.bat",
+                "size": 4,
+                "sha256": "0" * 64,
+            }
+        ],
+    }
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("rdx-tools/RELEASE_MANIFEST.json", json.dumps(stale_manifest))
+
+    ok, detail = release_gate._check_package_matches_source(tmp_path, package)
+
+    assert not ok
+    assert "stale relative to source tree" in detail
+
+
+def test_release_gate_accepts_zero_byte_files_in_release_manifest(tmp_path: Path) -> None:
+    source = tmp_path / "rdx.bat"
+    source.write_bytes(b"")
+    package = tmp_path / "dist" / "rdx-tools-1.0.0-windows-x64.zip"
+    package.parent.mkdir(parents=True, exist_ok=True)
+    source_sha = release_gate._sha256(source)
+    manifest = {
+        "name": "rdx-tools",
+        "version": "1.0.0",
+        "platform": "windows-x64",
+        "entrypoints": ["rdx.bat"],
+        "file_count": 1,
+        "files": [{"path": "rdx.bat", "size": 0, "sha256": source_sha}],
+    }
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("rdx-tools/RELEASE_MANIFEST.json", json.dumps(manifest))
+
+    ok, detail = release_gate._check_package_matches_source(tmp_path, package)
+
+    assert ok
+    assert "source manifest matched 1 files" in detail

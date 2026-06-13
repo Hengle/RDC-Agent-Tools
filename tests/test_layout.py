@@ -37,7 +37,7 @@ def test_catalog_boundaries_remove_legacy_surfaces_and_expand_export_params() ->
     payload = json.loads(catalog.read_text(encoding="utf-8"))
     tools = payload.get("tools", [])
     names = {str(t.get("name", "")).strip() for t in tools}
-    assert int(payload.get("tool_count") or 0) == 200
+    assert int(payload.get("tool_count") or 0) == 196
 
     removed = {
         "rd.app.is_available",
@@ -86,7 +86,6 @@ def test_required_directories_exist() -> None:
         ROOT / "binaries" / "windows" / "x64" / "python",
         ROOT / "binaries" / "windows" / "x64" / "pymodules",
         ROOT / "intermediate" / "runtime" / "rdx_cli",
-        ROOT / "intermediate" / "runtime" / "worker-cache",
         ROOT / "intermediate" / "runtime" / "worker-state",
         ROOT / "intermediate" / "artifacts",
         ROOT / "intermediate" / "pytest",
@@ -97,7 +96,7 @@ def test_required_directories_exist() -> None:
     assert (ROOT / "bin" / "rdx").is_file()
 
 
-def test_runtime_manifest_declares_bundled_python_and_worker_materialize_flags() -> None:
+def test_runtime_manifest_declares_bundled_python_and_required_runtime_files() -> None:
     manifest = ROOT / "binaries" / "windows" / "x64" / "manifest.runtime.json"
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     files = payload.get("files")
@@ -119,7 +118,9 @@ def test_runtime_manifest_declares_bundled_python_and_worker_materialize_flags()
         assert str(bundled_python.get(key) or "").strip(), key
 
     indexed = {str(item.get("path") or ""): item for item in files if isinstance(item, dict)}
-    assert indexed[str(bundled_python["python_entry"])] ["worker_materialize"] is False
-    assert indexed[str(bundled_python["python_dll"])] ["worker_materialize"] is False
-    assert indexed["renderdoc.dll"]["worker_materialize"] is True
-    assert indexed["pymodules/renderdoc.pyd"]["worker_materialize"] is True
+    assert str(bundled_python["python_entry"]) in indexed
+    assert str(bundled_python["python_dll"]) in indexed
+    assert "renderdoc.dll" in indexed
+    assert "pymodules/renderdoc.pyd" in indexed
+    removed_field = "worker_" + "materialize"
+    assert all(removed_field not in item for item in files if isinstance(item, dict))

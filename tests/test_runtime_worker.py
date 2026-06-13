@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
-import os
 from pathlib import Path
 
-from rdx import runtime_materializer
 from rdx.daemon import worker as daemon_worker
 
 
@@ -46,37 +45,44 @@ def _prepare_runtime_source(tmp_path: Path) -> Path:
     return bin_root
 
 
-def test_worker_uses_materialized_cache_and_does_not_lock_source_binaries(tmp_path: Path, monkeypatch) -> None:
+def test_worker_uses_source_runtime_directly(tmp_path: Path, monkeypatch) -> None:
     source_root = _prepare_runtime_source(tmp_path)
-    cache_root = tmp_path / "cache"
     monkeypatch.setenv("RDX_TOOLS_ROOT", str(ROOT))
-    monkeypatch.setattr(runtime_materializer, "binaries_root", lambda: source_root)
-    monkeypatch.setattr(runtime_materializer, "pymodules_dir", lambda: source_root / "pymodules")
-    monkeypatch.setattr(runtime_materializer, "worker_cache_dir", lambda: cache_root)
-    materialized = runtime_materializer.materialize_runtime()
-    monkeypatch.setattr(daemon_worker, "materialize_runtime", lambda: materialized)
+    monkeypatch.setattr(daemon_worker, "binaries_root", lambda: source_root)
+    monkeypatch.setattr(daemon_worker, "pymodules_dir", lambda: source_root / "pymodules")
+
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        pid = 12345
+        stdin = io.StringIO()
+        stdout = io.StringIO('{"kind":"ready"}\n')
+
+        def poll(self):  # type: ignore[no-untyped-def]
+            return None
+
+    def _fake_popen(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        return _FakeProcess()
+
+    monkeypatch.setattr(daemon_worker.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(daemon_worker.RuntimeWorkerProcess, "_save_state", lambda self: None)
 
     worker = daemon_worker.RuntimeWorkerProcess(context_id="pytest-worker")
+    worker._spawn()
     try:
-        status = worker.request("status", {})
-        assert status["ok"] is True
+        env = captured["env"]
+        assert isinstance(env, dict)
+        assert env["RDX_RUNTIME_DLL_DIR"] == str(source_root.resolve())
+        assert env["RDX_RENDERDOC_PATH"] == str((source_root / "pymodules").resolve())
+        assert env["RDX_WORKER_SOURCE_MANIFEST"] == str((source_root / "manifest.runtime.json").resolve())
 
-        response = worker.request(
-            "exec",
-            {
-                "operation": "rd.session.get_context",
-                "args": {},
-                "transport": "test",
-                "remote": False,
-                "context_id": "pytest-worker",
-            },
-        )
-        payload = response["result"]
-        assert payload["ok"] is True
-
-        renamed = source_root.with_name("x64_moved")
-        os.replace(source_root, renamed)
-        assert renamed.is_dir()
-        assert materialized.cache_root.is_dir()
+        worker_state = worker.snapshot()
+        assert worker_state["binaries_dir"] == str(source_root.resolve())
+        assert worker_state["pymodules_dir"] == str((source_root / "pymodules").resolve())
+        removed_fields = {"runtime_" + "id", "cache_" + "root"}
+        assert removed_fields.isdisjoint(worker_state)
     finally:
-        worker.stop()
+        worker._proc = None
+        worker._runtime = None

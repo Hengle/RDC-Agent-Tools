@@ -173,7 +173,6 @@ def test_remote_ping_rehydrates_handle_from_context_snapshot(monkeypatch) -> Non
     save_context_snapshot(
         {
             "context_id": context_id,
-            "entry_mode": "cli",
             "backend": "remote",
             "remote": {
                 "state": "live_handle",

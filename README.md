@@ -1,6 +1,6 @@
 ﻿# rdx-tools
 
-`rdx-tools` is a CLI-only RenderDoc `.rdc` runtime package. It exposes 200 `rd.*` tools through `rdx.bat`, `bin/rdx`, or `python cli/run_cli.py`.
+`rdx-tools` is a CLI-only RenderDoc `.rdc` runtime package. It exposes 196 `rd.*` tools through `rdx.bat`, `bin/rdx`, or `python cli/run_cli.py`.
 
 ## Entry Points
 
@@ -39,7 +39,7 @@ Release packages are self-contained Windows x64 zips. See [Install](docs/install
 
 ## Session State
 
-Use `rdx context status` to read context state and `rdx context update` to update notes, focus, and agent-visible metadata. `--daemon-context <id>` selects the continuous runtime namespace; omitting it uses `default`. The state includes `session_locator`, current capture/session IDs, preview state, and remote lifecycle fields for staged_handoff between agents. Local contexts support orchestrated multi-context work; remote contexts require stricter ownership. `remote_handle_consumed` means a remote handle has been bound to a replay session and must not be reused as a free remote connection.
+Use `rdx context status` to read context state and `rdx context update` to update notes, focus, and agent-visible metadata. `--daemon-context <id>` selects the continuous runtime namespace; omitting it uses `default`. Multiple daemon contexts are isolated from each other, and callers choose the context id they want to operate on. The state includes `session_locator`, current capture/session IDs, preview state, and remote lifecycle fields. `remote_handle_consumed` means a remote handle has been bound to a replay session and must not be reused as a free remote connection.
 
 ## Preview CLI Contract
 

@@ -13,9 +13,14 @@ rdx.bat call rd.capture.open_replay --args-file intermediate\logs\remote_open_re
 rdx.bat call rd.session.get_context --format json
 ```
 
-For Android, the connect args file must include `host`, `port`, and
-`options.transport="adb_android"`; include `options.device_serial` when more
-than one device may be attached. Keep `options.remote_id` explicit for
-`rd.capture.open_replay` so remote replay never falls back to local.
+For direct RenderDoc remote endpoints, the connect args file must include
+`host` and can include `port`. For Android adb bootstrap, set
+`options.transport="adb_android"`; `host` may be omitted and defaults to the
+local bootstrap endpoint. Include `options.device_serial` when more than one
+adb device may be attached. Release smoke records the actual serial used in
+`intermediate/logs/tool_smoke_findings.md`.
+
+Keep `options.remote_id` explicit for `rd.capture.open_replay` so remote replay
+never falls back to local.
 
 Run `preview_geometry_smoke.py` when the Android remote smoke changes preview behavior.

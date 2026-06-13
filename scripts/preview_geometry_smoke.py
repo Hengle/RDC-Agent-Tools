@@ -22,6 +22,16 @@ def _cli_path() -> Path:
     return _repo_root() / "cli" / "run_cli.py"
 
 
+def _python_cmd() -> str:
+    env_python = str(os.environ.get("RDX_PYTHON") or "").strip()
+    if env_python:
+        return env_python
+    bundled = _repo_root() / "binaries" / "windows" / "x64" / "python" / "python.exe"
+    if bundled.is_file():
+        return str(bundled)
+    return sys.executable
+
+
 def _timestamp() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
@@ -40,7 +50,7 @@ def _normalize_name(name: str) -> str:
 
 
 def _run_cli_raw(context: str, *args: str) -> Dict[str, Any]:
-    command = [sys.executable, str(_cli_path()), "--daemon-context", context, *args]
+    command = [_python_cmd(), str(_cli_path()), "--daemon-context", context, *args]
     result = subprocess.run(
         command,
         cwd=_repo_root(),
@@ -130,6 +140,19 @@ def _draws_under_marker(flat_nodes: List[Dict[str, Any]], marker_event_id: int, 
 def _first_draws(flat_nodes: List[Dict[str, Any]], *, max_count: int = 12) -> List[Dict[str, Any]]:
     draws = [node for node in flat_nodes if bool(dict(node.get("flags") or {}).get("is_draw"))]
     return draws[: max(1, int(max_count))]
+
+
+def _event_id(node: Dict[str, Any]) -> int:
+    return int(node.get("event_id") or node.get("eventId") or 0)
+
+
+def _has_framebuffer_output(draw: Dict[str, Any]) -> bool:
+    outputs = list(draw.get("outputs") or [])
+    for item in outputs:
+        text = str(item or "").strip()
+        if text and text not in {"0", "None", "ResourceId::0"}:
+            return True
+    return False
 
 
 def _adb_path() -> Optional[str]:
@@ -313,6 +336,101 @@ def _step_draws(context: str, session_id: str, draws: List[Dict[str, Any]], *, h
     return hop_log
 
 
+def _export_screenshot_for_draws(
+    context: str,
+    session_id: str,
+    draws: List[Dict[str, Any]],
+    output_path: Path,
+) -> tuple[Dict[str, Any], int, List[Dict[str, Any]]]:
+    prioritized = [draw for draw in draws if _has_framebuffer_output(draw)] or list(draws)
+    attempts: List[Dict[str, Any]] = []
+    for draw in list(reversed(prioritized))[:20]:
+        event_id = _event_id(draw)
+        if event_id <= 0:
+            continue
+        payload = _call(
+            context,
+            "rd.export.screenshot",
+            {
+                "session_id": session_id,
+                "event_id": event_id,
+                "output_path": str(output_path),
+                "target": {"rt_index": 0},
+            },
+            expect_ok=False,
+        )
+        attempts.append(
+            {
+                "event_id": event_id,
+                "ok": bool(payload.get("ok")),
+                "error_code": str(((payload.get("error") or {}).get("code") or "")),
+            }
+        )
+        if payload.get("_returncode") == 0 and payload.get("ok"):
+            return payload, event_id, attempts
+    raise RuntimeError(json.dumps({"error": "no_exportable_screenshot_draw", "attempts": attempts[-8:]}, ensure_ascii=False, indent=2))
+
+
+def _smoke_preview_draw_sequence(
+    *,
+    context: str,
+    session_id: str,
+    draws: List[Dict[str, Any]],
+    artifact_dir: Path,
+    scenario_name: str,
+    hop_delay_ms: int,
+    marker: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not draws:
+        return {"name": scenario_name, "status": "issue", "message": "no_draws"}
+    _set_active(context, session_id, _event_id(draws[0]))
+    _call(context, "rd.session.open_preview", {})
+    hop_log = _step_draws(context, session_id, draws, hop_delay_ms=hop_delay_ms)
+    safe_name = _normalize_name(scenario_name)
+    shot_path = artifact_dir / f"{safe_name}_rt0.png"
+    screenshot, screenshot_event_id, screenshot_attempts = _export_screenshot_for_draws(context, session_id, draws, shot_path)
+    _set_active(context, session_id, screenshot_event_id)
+    _call(context, "rd.session.open_preview", {})
+    context_snapshot = _preview_status(context)
+    preview_state = str((context_snapshot.get("preview") or {}).get("state") or "")
+    if preview_state != "live":
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "error": "preview_not_live",
+                    "scenario": scenario_name,
+                    "event_id": screenshot_event_id,
+                    "preview": dict(context_snapshot.get("preview") or {}),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    desktop_path = artifact_dir / f"{safe_name}_desktop.png"
+    preview_crop_path = artifact_dir / f"{safe_name}_preview.png"
+    desktop_screenshot = _capture_desktop_image(desktop_path)
+    preview_window_screenshot = _capture_preview_window(context, preview_crop_path)
+    scenario: Dict[str, Any] = {
+        "name": scenario_name,
+        "status": "pass",
+        "draw_count": len(draws),
+        "first_draw_event_id": _event_id(draws[0]),
+        "last_draw_event_id": _event_id(draws[-1]),
+        "screenshot_event_id": screenshot_event_id,
+        "preview": dict(context_snapshot.get("preview") or {}),
+        "runtime": dict(context_snapshot.get("runtime") or {}),
+        "screenshot_path": str((screenshot.get("data") or {}).get("saved_path") or shot_path),
+        "desktop_screenshot_path": desktop_screenshot,
+        "preview_window_screenshot_path": preview_window_screenshot,
+        "screenshot_attempts_tail": screenshot_attempts[-8:],
+        "hop_log_tail": hop_log[-12:],
+    }
+    if marker is not None:
+        scenario["marker_name"] = _action_label(marker)
+        scenario["marker_event_id"] = _event_id(marker)
+    return scenario
+
+
 def _smoke_local(
     *,
     capture_path: Path,
@@ -347,42 +465,30 @@ def _smoke_local(
             if not draws:
                 scenarios.append({"name": marker_hint, "status": "issue", "message": "no_draws_under_marker"})
                 continue
-            _set_active(daemon_context, session_id, int(draws[0].get("event_id") or 0))
-            _call(daemon_context, "rd.session.open_preview", {})
-            hop_log = _step_draws(daemon_context, session_id, draws, hop_delay_ms=hop_delay_ms)
-            context_snapshot = _preview_status(daemon_context)
-            shot_path = artifact_dir / f"local_{_normalize_name(marker_hint)}_rt0.png"
-            screenshot = _call(
-                daemon_context,
-                "rd.export.screenshot",
-                {
-                    "session_id": session_id,
-                    "event_id": int(draws[-1].get("event_id") or 0),
-                    "output_path": str(shot_path),
-                    "target": {"rt_index": 0},
-                },
-            )
-            desktop_path = artifact_dir / f"local_{_normalize_name(marker_hint)}_desktop.png"
-            preview_crop_path = artifact_dir / f"local_{_normalize_name(marker_hint)}_preview.png"
-            desktop_screenshot = _capture_desktop_image(desktop_path)
-            preview_window_screenshot = _capture_preview_window(daemon_context, preview_crop_path)
             scenarios.append(
-                {
-                    "name": marker_hint,
-                    "status": "pass",
-                    "marker_name": _action_label(marker),
-                    "marker_event_id": int(marker.get("event_id") or marker.get("eventId") or 0),
-                    "draw_count": len(draws),
-                    "first_draw_event_id": int(draws[0].get("event_id") or 0),
-                    "last_draw_event_id": int(draws[-1].get("event_id") or 0),
-                    "preview": dict(context_snapshot.get("preview") or {}),
-                    "runtime": dict(context_snapshot.get("runtime") or {}),
-                    "screenshot_path": str((screenshot.get("data") or {}).get("saved_path") or shot_path),
-                    "desktop_screenshot_path": desktop_screenshot,
-                    "preview_window_screenshot_path": preview_window_screenshot,
-                    "hop_log_tail": hop_log[-12:],
-                }
+                _smoke_preview_draw_sequence(
+                    context=daemon_context,
+                    session_id=session_id,
+                    draws=draws,
+                    artifact_dir=artifact_dir,
+                    scenario_name=f"local_{marker_hint}",
+                    hop_delay_ms=hop_delay_ms,
+                    marker=marker,
+                )
             )
+        if not any(item.get("status") == "pass" for item in scenarios):
+            fallback_draws = _first_draws(flat_nodes, max_count=12)
+            if fallback_draws:
+                scenarios.append(
+                    _smoke_preview_draw_sequence(
+                        context=daemon_context,
+                        session_id=session_id,
+                        draws=fallback_draws,
+                        artifact_dir=artifact_dir,
+                        scenario_name="local_first_draws_fallback",
+                        hop_delay_ms=hop_delay_ms,
+                    )
+                )
         _call(daemon_context, "rd.session.close_preview", {}, expect_ok=False)
         _call(daemon_context, "rd.core.shutdown", {}, expect_ok=False)
         result["status"] = "pass" if any(item.get("status") == "pass" for item in scenarios) else "issue"
@@ -417,6 +523,10 @@ def _smoke_remote(
         return result
     selected_serial = str(device_serial or "")
     if not selected_serial:
+        if len(devices) != 1:
+            result["status"] = "issue"
+            result["message"] = "multiple adb devices; pass --remote-device-serial"
+            return result
         selected_serial = devices[0].split()[0]
     _context_clear(daemon_context)
     _daemon_action(daemon_context, "stop", expect_ok=False)
@@ -450,44 +560,19 @@ def _smoke_remote(
             result["status"] = "issue"
             result["message"] = "no draw found in remote session"
             return result
-        _set_active(daemon_context, session_id, int(draws[0].get("event_id") or 0))
-        _call(daemon_context, "rd.session.open_preview", {})
-        hop_log = _step_draws(daemon_context, session_id, draws, hop_delay_ms=hop_delay_ms)
-        context_snapshot = _preview_status(daemon_context)
-        shot_path = artifact_dir / "remote_preview_rt0.png"
-        screenshot = _call(
-            daemon_context,
-            "rd.export.screenshot",
-            {
-                "session_id": session_id,
-                "event_id": int(draws[-1].get("event_id") or 0),
-                "output_path": str(shot_path),
-                "target": {"rt_index": 0},
-            },
+        scenario = _smoke_preview_draw_sequence(
+            context=daemon_context,
+            session_id=session_id,
+            draws=draws,
+            artifact_dir=artifact_dir,
+            scenario_name="remote_preview_follow",
+            hop_delay_ms=hop_delay_ms,
         )
-        desktop_path = artifact_dir / "remote_preview_desktop.png"
-        preview_crop_path = artifact_dir / "remote_preview_window.png"
-        desktop_screenshot = _capture_desktop_image(desktop_path)
-        preview_window_screenshot = _capture_preview_window(daemon_context, preview_crop_path)
+        scenario["remote_id"] = remote_id
+        scenario["device_serial"] = selected_serial
         result["status"] = "pass"
         result["message"] = ""
-        result["scenarios"] = [
-            {
-                "name": "remote_preview_follow",
-                "status": "pass",
-                "draw_count": len(draws),
-                "first_draw_event_id": int(draws[0].get("event_id") or 0),
-                "last_draw_event_id": int(draws[-1].get("event_id") or 0),
-                "preview": dict(context_snapshot.get("preview") or {}),
-                "runtime": dict(context_snapshot.get("runtime") or {}),
-                "screenshot_path": str((screenshot.get("data") or {}).get("saved_path") or shot_path),
-                "desktop_screenshot_path": desktop_screenshot,
-                "preview_window_screenshot_path": preview_window_screenshot,
-                "hop_log_tail": hop_log[-12:],
-                "remote_id": remote_id,
-                "device_serial": selected_serial,
-            }
-        ]
+        result["scenarios"] = [scenario]
         _call(daemon_context, "rd.session.close_preview", {}, expect_ok=False)
         _call(daemon_context, "rd.core.shutdown", {}, expect_ok=False)
         return result

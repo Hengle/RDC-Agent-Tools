@@ -31,7 +31,7 @@ def test_validate_bundled_python_layout_reports_complete_bundle(tmp_path: Path, 
         json.dumps(
             {
                 "file_count": 1,
-                "files": [{"path": "renderdoc.dll", "size": 1, "sha256": "00", "worker_materialize": True}],
+                "files": [{"path": "renderdoc.dll", "size": 1, "sha256": "00"}],
                 "bundled_python": {
                     "python_version": "3.14.3",
                     "python_entry": "python/python.exe",

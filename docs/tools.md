@@ -1,6 +1,6 @@
 ﻿# Tools
 
-`spec/tool_catalog.json` defines 200 `rd.*` tools. The public transport is CLI; raw tool calls use `rdx.bat call <rd.*>` or `python cli/run_cli.py call <rd.*>`.
+`spec/tool_catalog.json` defines 196 `rd.*` tools. The public transport is CLI; raw tool calls use `rdx.bat call <rd.*>` or `python cli/run_cli.py call <rd.*>`.
 
 ```bat
 rdx.bat tools list --json

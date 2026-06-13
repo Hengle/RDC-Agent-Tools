@@ -43,51 +43,53 @@
         }
       ]
     },
+    "rd.remote.connect": {
+      "description": "连接到远程 RenderDoc server；支持 direct RenderDoc endpoint 和 Android adb bootstrap。",
+      "parameter_raw": "host (str, renderdoc transport required; adb_android optional)<br>port (int, optional, default 38920)<br>timeout_ms (int, optional, default 5000)<br>options (dict, optional): {transport?: 'renderdoc'|'adb_android', device_serial?, local_port?, install_apk?, push_config?}",
+      "returns_raw": "ok (bool)<br>data (dict): {remote_id, server_info}; for adb_android, server_info/bootstrap details identify the resolved endpoint and selected device when available<br>artifacts (list)<br>error (dict|null): direct renderdoc transport requires host; adb_android may omit host and defaults to the local bootstrap endpoint; unsupported transports return `remote_transport_unsupported`<br>meta (dict)<br>projections (dict, optional)",
+      "param_names": [
+        "host",
+        "port",
+        "timeout_ms",
+        "options"
+      ]
+    },
     "rd.event.set_active": {
       "description": "设置当前 active event；成功后 runtime 与 context snapshot 必须同步到同一个 resolved event，失败时保持旧状态不变。"
     },
     "rd.pipeline.get_state": {
-      "parameter_raw": "session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>detail_level (str, 可选, 默认 'full'): 'summary'|'full'<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
+      "parameter_raw": "session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>detail_level (str, 可选, 默认 'full'): 'summary'|'full'<br>context_id (str, optional): choose the context to use; defaults to the current daemon context",
       "param_names": [
         "session_id",
         "event_id",
         "detail_level",
-        "context_id",
-        "runtime_owner",
-        "owner_lease_id",
-        "baton_id"
+        "context_id"
       ],
       "returns_raw": "ok (bool)<br>data (dict): {pipeline_state, resolved_event_id}; `pipeline_state` 额外包含 `backend_type`、`summary_status`、`summary_degraded_reasons`、`binding_truth_level`、`visual_truth_level` 与 `evidence_truth_level`<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)"
     },
     "rd.pipeline.get_state_summary": {
-      "parameter_raw": "session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>include_bindings (bool, 可选, 默认 true)<br>include_shaders (bool, 可选, 默认 true)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
+      "parameter_raw": "session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>include_bindings (bool, 可选, 默认 true)<br>include_shaders (bool, 可选, 默认 true)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context",
       "param_names": [
         "session_id",
         "event_id",
         "include_bindings",
         "include_shaders",
-        "context_id",
-        "runtime_owner",
-        "owner_lease_id",
-        "baton_id"
+        "context_id"
       ],
       "returns_raw": "ok (bool)<br>data (dict): {summary, resolved_event_id}; `summary` 额外包含 `summary_status`、`summary_degraded_reasons`、`binding_truth_level` 与 `evidence_truth_level`，用于区分 verified / partial / degraded state 摘要<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)"
     },
     "rd.pipeline.get_output_targets": {
-      "parameter_raw": "session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
+      "parameter_raw": "session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>context_id (str, optional): choose the context to use; defaults to the current daemon context",
       "param_names": [
         "session_id",
         "event_id",
-        "context_id",
-        "runtime_owner",
-        "owner_lease_id",
-        "baton_id"
+        "context_id"
       ],
       "returns_raw": "ok (bool)<br>data (dict): {framebuffer, resolved_event_id}; `framebuffer` 额外包含 `summary_status`、`summary_degraded_reasons` 与 `binding_truth_level`，用于标记 visual_evidence_only / binding degraded 等 truth 状态<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)"
     },
     "rd.shader.get_reflection": {
       "description": "获取指定 shader 的反射信息；支持 `event_id + stage` 与 `event_id + stage + shader_id` 两种 event-bound 绑定方式，显式 `shader_id` 会优先参与身份校验。",
-      "parameter_raw": "session_id (str)<br>shader_id (str, 可选): 若提供，则必须与请求 event/stage 当前绑定 shader identity 一致<br>stage (str, 可选): 若未提供 `shader_id`，则与 `event_id` 一起解析当前绑定 shader<br>event_id (int, 可选): 缺省为当前 active event<br>include_bindings (bool, 可选, 默认 true)<br>include_constant_blocks (bool, 可选, 默认 true)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
+      "parameter_raw": "session_id (str)<br>shader_id (str, 可选): 若提供，则必须与请求 event/stage 当前绑定 shader identity 一致<br>stage (str, 可选): 若未提供 `shader_id`，则与 `event_id` 一起解析当前绑定 shader<br>event_id (int, 可选): 缺省为当前 active event<br>include_bindings (bool, 可选, 默认 true)<br>include_constant_blocks (bool, 可选, 默认 true)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context",
       "param_names": [
         "session_id",
         "shader_id",
@@ -95,10 +97,7 @@
         "event_id",
         "include_bindings",
         "include_constant_blocks",
-        "context_id",
-        "runtime_owner",
-        "owner_lease_id",
-        "baton_id"
+        "context_id"
       ],
       "returns_raw": "ok (bool)<br>data (dict): {reflection, shader_id, resolved_event_id}<br>artifacts (list)<br>error (dict|null): 绑定失败显式返回 `shader_binding_lookup_failed` / `shader_stage_mismatch` / `shader_reflection_unavailable`，不再把所有失败折叠成 `shader_not_bound`<br>meta (dict)<br>projections (dict, 可选)"
     },
@@ -115,14 +114,14 @@
     },
     "rd.shader.debug_start": {
       "description": "启动 shader debugger（默认 pixel），在 remote replay 下会先读取 remote capability matrix；如果当前 backend/session 明确不支持 debug，则在创建 trace 前直接 truthful-fail。",
-      "parameter_raw": "session_id (str)<br>mode (str, 可选, 默认 'pixel'): 当前正式支持 `pixel`；传入其他 mode 会返回结构化 `validation_error`，并在 details 中附带 `supported_modes` / `requested_mode` / `failure_stage` / `failure_reason`<br>event_id (int, 可选): 缺省为当前 active event<br>params (dict): pixel 模式下使用 {x, y, sample?, target?, view?, primitive?}<br>timeout_ms (int, 可选, 默认 10000)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
+      "parameter_raw": "session_id (str)<br>mode (str, 可选, 默认 'pixel'): 当前正式支持 `pixel`；传入其他 mode 会返回结构化 `validation_error`，并在 details 中附带 `supported_modes` / `requested_mode` / `failure_stage` / `failure_reason`<br>event_id (int, 可选): 缺省为当前 active event<br>params (dict): pixel 模式下使用 {x, y, sample?, target?, view?, primitive?}<br>timeout_ms (int, 可选, 默认 10000)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context",
       "returns_raw": "ok (bool)<br>data (dict): {shader_debug_id, initial_state, resolved_context, resolved_event_id, pixel_history_summary, selected_target_source, failure_stage, failure_reason, attempts}<br>artifacts (list)<br>error (dict|null): remote backend/session 明确不支持时，优先返回 capability-style 错误，而不是等到 trace 创建后才报 `debugger_handle_missing`<br>meta (dict)<br>projections (dict, 可选)"
     },
     "rd.shader.compile": {
       "returns_raw": "ok (bool)<br>data (dict): {session_id, shader_id, entry, stage, source_encoding, supported_source_encodings, runtime_replacement_supported, runtime_replacement_reason, messages, compiler_messages, edit_plan, saved_path?, artifact_path?, byte_size?}<br>artifacts (list)<br>error (dict|null): 当请求的 `source_encoding` 不被当前 replay backend 支持时，显式返回 `shader_compile_encoding_unsupported`，并附带 `supported_source_encodings`、`runtime_replacement_supported`、`runtime_replacement_reason` 与 `edit_plan`，把“compile 支持”与“runtime replacement 支持”分开表达；DXIL/DXBC 的字符串 `source` 输入不会被当作二进制容器提交<br>meta (dict)<br>projections (dict, 可选)"
     },
     "rd.texture.get_data": {
-      "parameter_raw": "session_id (str)<br>texture_id (str): 纹理资源 ID<br>event_id (int, 可选): 若提供则在该 event 上解析 texture/readback，并回传 resolved_event_id<br>subresource (dict, 可选): 包含 mip (int, 默认 0), slice (int, 默认 0), sample (int, 默认 0)<br>output_path (str, 可选): 若提供则必须使用 `.npz` 扩展名<br>as_base64 (bool, 可选): 同时返回 `.npz` 容器的 base64 文本<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
+      "parameter_raw": "session_id (str)<br>texture_id (str): 纹理资源 ID<br>event_id (int, 可选): 若提供则在该 event 上解析 texture/readback，并回传 resolved_event_id<br>subresource (dict, 可选): 包含 mip (int, 默认 0), slice (int, 默认 0), sample (int, 默认 0)<br>output_path (str, 可选): 若提供则必须使用 `.npz` 扩展名<br>as_base64 (bool, 可选): 同时返回 `.npz` 容器的 base64 文本<br>context_id (str, optional): choose the context to use; defaults to the current daemon context",
       "param_names": [
         "session_id",
         "texture_id",
@@ -130,10 +129,7 @@
         "subresource",
         "output_path",
         "as_base64",
-        "context_id",
-        "runtime_owner",
-        "owner_lease_id",
-        "baton_id"
+        "context_id"
       ],
       "returns_raw": "ok (bool)<br>data (dict): {artifact_path, saved_path, content_kind, container_format, stats, byte_size, resolved_event_id, texture_id, target_metadata, binding_truth_level, evidence_truth_level, summary_degraded_reasons, base64?}<br>artifacts (list)<br>error (dict|null): `output_path` 不是 `.npz` 时显式返回 `texture_output_path_extension_mismatch`<br>meta (dict)<br>projections (dict, 可选)"
     },
@@ -145,7 +141,7 @@
       "returns_raw": "ok (bool)<br>data (dict): {output_dir, bundle_path, resolved_event_id}<br>artifacts (list)<br>error (dict|null): 当请求 event 没有可绑定 shader 时，显式返回 `shader_bundle_empty`<br>meta (dict)<br>projections (dict, 可选)"
     },
     "rd.session.get_context": {
-      "returns_raw": "ok (bool)<br>data (dict): {context_id, entry_mode, backend, runtime_parallelism_ceiling, session_locator, runtime, remote, focus, last_artifacts, current_session_id, sessions, recovery, limits, active_operation, recent_operations, runtime_owner, owner_lease, active_baton, rehydrate_status, updated_at_ms, remote_capability_matrix, remote_context_locality, remote_handle_origin_context, remote_handle_reuse_policy}; remote_capability_matrix is state-first for get_context and may report not_currently_probed for live shader/debug/replace capability probes<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)"
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, backend, session_locator, runtime, remote, focus, notes, last_artifacts, preview{enabled,state,view_mode,bound_session_id,bound_capture_file_id,bound_event_id,backend,recovered_from_session_id,rebind_count,last_error,display{output_slot,texture_id,texture_format,framebuffer_extent,viewport_rect,scissor_rect,effective_region_rect,region_marker_mode,window_rect,fit_mode,screen_cap_ratio},updated_at_ms}, current_session_id, sessions, recovery, limits, active_operation, recent_operations, updated_at_ms, remote_capability_matrix, remote_context_locality, remote_handle_origin_context, remote_handle_reuse_policy}; remote_capability_matrix is state-first for get_context and may report not_currently_probed for live shader/debug/replace capability probes<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)"
     },
     "rd.core.get_capabilities": {
       "description": "获取当前环境能力详情；除 replay/remote/debug 基础项外，还会暴露当前 context/session/backend 视角下的 remote capability matrix。",

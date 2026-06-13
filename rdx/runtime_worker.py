@@ -45,8 +45,8 @@ def main(argv: list[str] | None = None) -> int:
             "kind": "ready",
             "context_id": context_id,
             "pid": os.getpid(),
-            "runtime_id": str(os.environ.get("RDX_WORKER_RUNTIME_ID") or ""),
-            "cache_root": str(os.environ.get("RDX_WORKER_CACHE_ROOT") or ""),
+            "binaries_dir": str(os.environ.get("RDX_RUNTIME_DLL_DIR") or ""),
+            "pymodules_dir": str(os.environ.get("RDX_RENDERDOC_PATH") or ""),
             "source_manifest": str(os.environ.get("RDX_WORKER_SOURCE_MANIFEST") or ""),
         }
     )
@@ -97,8 +97,8 @@ def main(argv: list[str] | None = None) -> int:
                         "result": {
                             "running": True,
                             "pid": os.getpid(),
-                            "runtime_id": str(os.environ.get("RDX_WORKER_RUNTIME_ID") or ""),
-                            "cache_root": str(os.environ.get("RDX_WORKER_CACHE_ROOT") or ""),
+                            "binaries_dir": str(os.environ.get("RDX_RUNTIME_DLL_DIR") or ""),
+                            "pymodules_dir": str(os.environ.get("RDX_RENDERDOC_PATH") or ""),
                             "source_manifest": str(os.environ.get("RDX_WORKER_SOURCE_MANIFEST") or ""),
                         },
                     }

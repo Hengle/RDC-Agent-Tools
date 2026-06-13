@@ -20,6 +20,38 @@ if str(SCRIPT_ROOT) not in sys.path:
 from scripts._shared import extract_json_payload
 
 
+TEXT_SUFFIXES = {
+    ".bat",
+    ".cmd",
+    ".json",
+    ".md",
+    ".ps1",
+    ".py",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+LEGACY_PATH_MARKERS = (
+    "rdx/" + "runtime_" + "materializer.py",
+    "intermediate/runtime/" + "worker" + "-cache",
+)
+LEGACY_TEXT_MARKERS = (
+    "worker_" + "materialize",
+    "runtime_" + "owner",
+    "owner_" + "lease",
+    "runtime_" + "baton",
+    "active_" + "baton",
+    "rehydrate_" + "status",
+    "staged_" + "handoff",
+    "runtime_" + "parallelism_" + "ceiling",
+    "claim_" + "runtime_" + "owner",
+    "release_" + "runtime_" + "owner",
+    "export_" + "runtime_" + "baton",
+    "rehydrate_" + "runtime_" + "baton",
+)
+
+
 def _cmd_exe() -> str:
     system_root = str(os.environ.get("SystemRoot") or r"C:\Windows")
     return str(Path(system_root) / "System32" / "cmd.exe")
@@ -92,6 +124,25 @@ def _verify_cli_contract(root: Path) -> None:
             raise RuntimeError(f"negative contract check expected {expected}: rdx.bat {' '.join(args)} exit={code}\n{output}")
 
 
+def _verify_no_legacy_payload(zip_path: Path) -> None:
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        for name in archive.namelist():
+            normalized = name.replace("\\", "/")
+            for marker in LEGACY_PATH_MARKERS:
+                if marker in normalized:
+                    raise RuntimeError(f"package contains pre-GA path: {normalized}")
+            suffix = Path(normalized).suffix.lower()
+            if suffix not in TEXT_SUFFIXES:
+                continue
+            info = archive.getinfo(name)
+            if info.file_size > 5 * 1024 * 1024:
+                continue
+            text = archive.read(name).decode("utf-8", errors="ignore")
+            for marker in LEGACY_TEXT_MARKERS:
+                if marker in text:
+                    raise RuntimeError(f"package contains pre-GA marker {marker!r} in {normalized}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify an rdx-tools release package")
     parser.add_argument("--zip", dest="zip_path", required=True, help="Release zip path")
@@ -104,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
 
     temp_dir = Path(tempfile.mkdtemp(prefix="rdx package verify "))
     try:
+        _verify_no_legacy_payload(zip_path)
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(temp_dir)
         root = _find_package_root(temp_dir)

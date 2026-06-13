@@ -14,6 +14,7 @@ Rules for external captures:
 - Do not copy local, private, customer, or large captures into `tests/fixtures/`.
 - Do not write developer-machine absolute paths into source, docs, tests, or release metadata.
 - Record the capture path, size, SHA256, command sequence, and result in `intermediate/logs/tool_smoke_findings.md` when running local or remote smoke.
+- Record the Android device serial and release package SHA256 in the same evidence file when they are part of the release validation.
 - If a capture exposes a product bug or environment blocker, keep the evidence log and open a focused follow-up task instead of weakening the release gate.
 
 Release behavior:

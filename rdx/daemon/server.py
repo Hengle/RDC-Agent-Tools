@@ -147,25 +147,11 @@ class DaemonRuntime(ProgressSink):
             "capture_count": 0,
             "recovery_status": "idle",
             "backend": "local",
-            "runtime_owner": {
-                "agent_id": "",
-                "lease_id": "",
-                "status": "unclaimed",
-                "claimed_at_ms": 0,
-                "released_at_ms": 0,
-            },
-            "owner_lease": {
-                "agent_id": "",
-                "lease_id": "",
-                "status": "unclaimed",
-                "claimed_at_ms": 0,
-                "released_at_ms": 0,
-            },
             "worker": {
                 "running": False,
                 "pid": 0,
-                "runtime_id": "",
-                "cache_root": "",
+                "binaries_dir": "",
+                "pymodules_dir": "",
                 "source_manifest": "",
             },
         }
@@ -257,20 +243,6 @@ class DaemonRuntime(ProgressSink):
         self.state["capture_count"] = 0
         self.state["recovery_status"] = "idle"
         self.state["backend"] = "local"
-        self.state["runtime_owner"] = {
-            "agent_id": "",
-            "lease_id": "",
-            "status": "unclaimed",
-            "claimed_at_ms": 0,
-            "released_at_ms": 0,
-        }
-        self.state["owner_lease"] = {
-            "agent_id": "",
-            "lease_id": "",
-            "status": "unclaimed",
-            "claimed_at_ms": 0,
-            "released_at_ms": 0,
-        }
         self.state["active_operation"] = {}
 
     def _set_active_operation_locked(
@@ -343,8 +315,8 @@ class DaemonRuntime(ProgressSink):
         return {
             "running": bool(worker.get("running")),
             "pid": int(worker.get("pid") or 0),
-            "runtime_id": str(worker.get("runtime_id") or ""),
-            "cache_root": str(worker.get("cache_root") or ""),
+            "binaries_dir": str(worker.get("binaries_dir") or ""),
+            "pymodules_dir": str(worker.get("pymodules_dir") or ""),
             "source_manifest": str(worker.get("source_manifest") or ""),
         }
 
@@ -370,8 +342,6 @@ class DaemonRuntime(ProgressSink):
         self.state["capture_count"] = len(context_state.get("captures", {}))
         self.state["recovery_status"] = str((context_state.get("recovery") or {}).get("status") or "idle")
         self.state["backend"] = str(context_state.get("backend") or "local")
-        self.state["runtime_owner"] = dict(context_state.get("runtime_owner") or {})
-        self.state["owner_lease"] = dict(context_state.get("owner_lease") or {})
         self.state["worker"] = self._worker_snapshot_locked()
 
     def _ensure_worker(self) -> RuntimeWorkerProcess:
