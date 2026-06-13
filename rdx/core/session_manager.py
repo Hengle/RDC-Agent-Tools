@@ -3,9 +3,12 @@
 import asyncio
 import functools
 import logging
+import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from rdx.core.renderdoc_status import build_renderdoc_error_details, status_ok as _rd_status_ok, status_text as _rd_status_text
 from rdx.models import (
@@ -121,6 +124,12 @@ class SessionState:
     capture_file: Any = None
     remote_server: Any = None
     remote_server_owned: bool = True
+    remote_host: str = ""
+    remote_port: Any = None
+    remote_transport: str = ""
+    remote_bootstrap: Dict[str, Any] = field(default_factory=dict)
+    remote_bootstrap_result: Any = None
+    remote_device_serial: str = ""
     capabilities: SessionCapabilities = field(default_factory=SessionCapabilities)
     capture_id: Optional[str] = None
     is_initialized: bool = False
@@ -306,11 +315,17 @@ class SessionManager:
                 message="Remote session backend requires an explicit host from options.remote_id",
             )
         url = f"{host}:{port}" if port else host
+        state.remote_host = host
+        state.remote_port = port
 
         remote = backend_config.get("remote_server")
         if remote is not None:
             state.remote_server = remote
             state.remote_server_owned = bool(backend_config.get("close_remote_server_on_cleanup", False))
+            state.remote_transport = str(backend_config.get("transport") or "").strip()
+            state.remote_bootstrap = dict(backend_config.get("bootstrap") or {})
+            state.remote_bootstrap_result = backend_config.get("bootstrap_result")
+            state.remote_device_serial = str(backend_config.get("device_serial") or "").strip()
             logger.debug("Reusing remote RenderDoc server connection at %s", url)
             return
 
@@ -325,6 +340,7 @@ class SessionManager:
         )
         state.remote_server = remote
         state.remote_server_owned = True
+        state.remote_transport = str(backend_config.get("transport") or "").strip()
         logger.debug("Connected to remote RenderDoc server at %s", url)
 
     async def _open_local_capture(self, state: SessionState, rdc_path: str) -> None:
@@ -354,12 +370,57 @@ class SessionManager:
         await self._create_headless_output(state, controller)
 
     async def _open_remote_capture(self, state: SessionState, rdc_path: str) -> None:
-        rd = _get_rd()
         if state.remote_server is None:
             raise SessionError(code="no_remote_server", message="Remote session has no active server connection")
-        remote_rdc_path = await self._offload(state.remote_server.CopyCaptureToRemote, rdc_path, None)
-        status, controller = await self._offload(
-            state.remote_server.OpenCapture,
+        remote_server, remote_rdc_path, controller = await self._offload(self._open_remote_capture_sync, state, rdc_path)
+        state.remote_server = remote_server
+        state.remote_server_owned = True
+        state.controller = controller
+        await self._create_headless_output(state, controller)
+
+    def _open_remote_capture_sync(self, state: SessionState, rdc_path: str) -> tuple[Any, str, Any]:
+        rd = _get_rd()
+        remote_server = state.remote_server
+        if state.remote_host:
+            url = f"{state.remote_host}:{state.remote_port}" if state.remote_port else state.remote_host
+            status, remote_server = rd.CreateRemoteServerConnection(url)
+            _check_status(
+                status,
+                f"CreateRemoteServerConnection({url})",
+                backend_type="remote",
+                capture_context={"session_id": state.session_id, "endpoint": url},
+                classification="remote_replay_runtime",
+                fix_hint="Reconnect the Android remote endpoint before opening the capture.",
+            )
+        copy_error = ""
+        try:
+            remote_rdc_path = remote_server.CopyCaptureToRemote(rdc_path, None)
+        except Exception as exc:
+            remote_rdc_path = ""
+            copy_error = str(exc)
+        if not str(remote_rdc_path or "").strip() and state.remote_transport == "adb_android":
+            remote_rdc_path = self._copy_android_capture_with_adb(state, rdc_path)
+        if not str(remote_rdc_path or "").strip():
+            details = {
+                "source_layer": "renderdoc_remote_copy",
+                "operation": "remote.CopyCaptureToRemote()",
+                "backend_type": "remote",
+                "capture_context": {
+                    "session_id": state.session_id,
+                    "capture_path": str(rdc_path),
+                    "remote_capture_path": "",
+                },
+                "classification": "remote_replay_runtime",
+                "fix_hint": "Verify the remote endpoint can receive the capture before retrying remote replay.",
+            }
+            if copy_error:
+                details["copy_error"] = copy_error
+            raise SessionError(
+                code="remote_capture_copy_failed",
+                message="remote.CopyCaptureToRemote() did not return a remote capture path",
+                details=details,
+            )
+        status, controller = remote_server.OpenCapture(
             0,
             remote_rdc_path,
             rd.ReplayOptions(),
@@ -377,8 +438,51 @@ class SessionManager:
             classification="remote_replay_runtime",
             fix_hint="Verify the remote endpoint can open the copied capture and has a compatible replay environment.",
         )
-        state.controller = controller
-        await self._create_headless_output(state, controller)
+        return remote_server, str(remote_rdc_path), controller
+
+    def _copy_android_capture_with_adb(self, state: SessionState, rdc_path: str) -> str:
+        bootstrap_result = state.remote_bootstrap_result
+        bootstrap = dict(state.remote_bootstrap or {})
+        adb_path = str(getattr(bootstrap_result, "adb_path", "") or bootstrap.get("adb_path") or "").strip()
+        device_serial = str(
+            state.remote_device_serial
+            or getattr(bootstrap_result, "device_serial", "")
+            or bootstrap.get("device_serial")
+            or ""
+        ).strip()
+        package_name = str(getattr(bootstrap_result, "package_name", "") or bootstrap.get("package_name") or "").strip()
+        config_remote_path = str(
+            getattr(bootstrap_result, "config_remote_path", "") or bootstrap.get("config_remote_path") or ""
+        ).strip()
+        if not adb_path or not device_serial:
+            return ""
+        if config_remote_path and "/" in config_remote_path:
+            remote_root = config_remote_path.rsplit("/", 1)[0]
+        elif package_name:
+            remote_root = f"/sdcard/Android/data/{package_name}/files"
+        else:
+            return ""
+        remote_dir = f"{remote_root.rstrip('/')}/rdx_captures"
+        remote_name = f"{uuid4().hex}-{Path(rdc_path).name}"
+        remote_path = f"{remote_dir}/{remote_name}".replace("\\", "/")
+        base_cmd = [adb_path]
+        if device_serial:
+            base_cmd.extend(["-s", device_serial])
+        subprocess.run(
+            base_cmd + ["shell", "mkdir", "-p", remote_dir],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            base_cmd + ["push", str(rdc_path), remote_path],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        return remote_path
 
     async def _create_headless_output(self, state: SessionState, controller: Any) -> None:
         rd = _get_rd()

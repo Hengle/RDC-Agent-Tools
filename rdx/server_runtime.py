@@ -7003,6 +7003,9 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                 "remote_id": remote_id,
                 "remote_server": remote_handle.remote_server,
                 "close_remote_server_on_cleanup": False,
+                "bootstrap": dict(remote_handle.bootstrap or {}),
+                "bootstrap_result": remote_handle.bootstrap_result,
+                "device_serial": remote_handle.device_serial,
             }
         session_info = await _session_manager.create_session(
             backend_config=backend_config,

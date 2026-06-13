@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 from rdx import server
-from rdx.core.session_manager import _map_graphics_api
+from rdx.core.session_manager import SessionManager, SessionState, _map_graphics_api
 from rdx.context_snapshot import clear_context_snapshot
+from rdx.models import BackendType
 
 
 class DummyRemoteServer:
@@ -24,6 +26,67 @@ class DummyRemoteServer:
 
     def ShutdownConnection(self) -> None:
         self.shutdown_called = True
+
+
+class _OkStatus:
+    def OK(self) -> bool:
+        return True
+
+    def Message(self) -> str:
+        return "Success"
+
+
+class _FreshRemoteServer:
+    def __init__(self) -> None:
+        self.copied: list[str] = []
+        self.opened: list[str] = []
+
+    def CopyCaptureToRemote(self, filename: str, _progress: object) -> str:
+        self.copied.append(filename)
+        return "/remote/copied.rdc"
+
+    def OpenCapture(self, _proxyid: int, logfile: str, _opts: object, _progress: object) -> tuple[_OkStatus, object]:
+        self.opened.append(logfile)
+        return _OkStatus(), object()
+
+
+class _FakeRenderDocModule:
+    NoPreference = 0
+
+    class ReplayOptions:
+        pass
+
+    def __init__(self, remote: _FreshRemoteServer) -> None:
+        self.remote = remote
+        self.connections: list[str] = []
+
+    def CreateRemoteServerConnection(self, url: str) -> tuple[_OkStatus, _FreshRemoteServer]:
+        self.connections.append(url)
+        return _OkStatus(), self.remote
+
+
+def test_remote_open_uses_fresh_connection_and_native_remote_copy(monkeypatch) -> None:
+    remote = _FreshRemoteServer()
+    fake_renderdoc = _FakeRenderDocModule(remote)
+    monkeypatch.setitem(sys.modules, "renderdoc", fake_renderdoc)
+
+    state = SessionState(
+        session_id="sess_remote",
+        backend_type=BackendType.REMOTE,
+        remote_server=DummyRemoteServer(),
+        remote_host="127.0.0.1",
+        remote_port=64590,
+        remote_transport="adb_android",
+    )
+
+    opened_remote, remote_path, controller = SessionManager()._open_remote_capture_sync(state, "C:/captures/WhiteHair.rdc")
+
+    assert opened_remote is remote
+    assert controller is not None
+    assert remote_path == "/remote/copied.rdc"
+    assert fake_renderdoc.connections == ["127.0.0.1:64590"]
+    assert remote.copied == ["C:/captures/WhiteHair.rdc"]
+    assert remote.opened == ["/remote/copied.rdc"]
 
 
 class FailingExecuteStatus:
